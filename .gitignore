@@ -1,0 +1,19 @@
+# macOS / Editor / OS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# C++ / CMake / JUCE build & packaging
+build/
+cmake-build-*/
+dist_stage/
+dist_out/
+validation-logs/
+*.o
+*.a
+*.so
+*.dylib
+*.vst3
+*.component
+*.exe
