@@ -4,7 +4,7 @@
 
 <h1 align="center">KE-310 Organ</h1>
 <p align="center">
-  <strong>Retro Home Organ Series #1</strong> by <strong>Yuguen Organ (ゆうげんオルガン)</strong><br>
+  <strong>Retro Home Organ Collection #1</strong> by <strong>Yuguen Organ (ゆうげんオルガン)</strong><br>
   1979 Analog Transistor Home Organ Simulator &mdash; VST3 / macOS AudioUnit (AU) / Standalone
 </p>
 <p align="center">
@@ -19,10 +19,10 @@
 
 ## Overview / 概要
 
-**KE-310 Organ** is the first instrument in the **Retro Home Organ Series** developed by **Yuguen Organ (ゆうげんオルガン)**.
+**KE-310 Organ** is the first instrument in the **Retro Home Organ Collection** developed by **Yuguen Organ (ゆうげんオルガン)**.
 It models the tone generators, divider architecture, analog formant filters, keying/envelope buses, spring reverb, and built-in hornless rotary drum speaker of the 1979 KE-310 transistor home organ in real-time C++20 DSP (`JUCE 8`).
 
-**KE-310 Organ** は、**Yuguen Organ（ゆうげんオルガン）** が贈る **Retro Home Organ Series 第1弾** です。
+**KE-310 Organ** は、**Yuguen Organ（ゆうげんオルガン）** が贈る **Retro Home Organ Collection 第1弾** です。
 1979年製トランジスタ電子オルガン（KE-310）の音源・分周器・フォルマントフィルタ・キーイング回路・スプリングリバーブ・内蔵ホーンなしロータリードラムスピーカーを、リアルタイム C++20 DSP（JUCE 8）で再現した VST3 / AU / Standalone インストゥルメントです。
 
 > [!NOTE]
