@@ -8,7 +8,7 @@
   1979 Analog Transistor Home Organ &amp; Built-In / Standalone Analog Rhythm Synthesizer &mdash; VST3 / macOS AudioUnit (AU) / Standalone
 </p>
 <p align="center">
-  <em>Current Status: Public Alpha (<code>v0.1.0-alpha</code>) &bull; License: GPLv3</em>
+  <em>Current Status: Public Alpha (<code>v0.1.1-alpha</code>) &bull; License: GPLv3</em>
 </p>
 
 <p align="center">
@@ -41,7 +41,7 @@ It models the tone generators, divider architecture, analog formant filters, key
 1979年製トランジスタ電子オルガン（KE-310）の音源・分周器・フォルマントフィルタ・キーイング回路・スプリングリバーブ・内蔵ホーンなしロータリードラムスピーカーに加え、実機内蔵のリズムマシン **KE Rhythmbox** までをリアルタイム C++20 DSP（JUCE 8）で再現しました。オルガン本体への内蔵に加え、**KE Rhythmbox** 単体プラグイン（VST3 / AU / Standalone）も同梱しています。
 
 > [!NOTE]
-> This is an **Alpha release (`v0.1.0-alpha`)**. Feedback, bug reports, and DAW compatibility reports via GitHub Issues are welcome.
+> This is an **Alpha release (`v0.1.1-alpha`)**. Feedback, bug reports, and DAW compatibility reports via GitHub Issues are welcome.
 
 ---
 
