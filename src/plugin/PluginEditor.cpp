@@ -640,18 +640,138 @@ void TelemetryDisplay::paint(juce::Graphics& g)
 }
 
 //==============================================================================
+// SettingsGearButton & SettingsBayComponent
+//==============================================================================
+SettingsGearButton::SettingsGearButton()
+{
+    setClickingTogglesState(true);
+    setTooltip("Settings (MIDI Routing, Tuning, Rotary Drum & Rhythmbox Sync)");
+}
+
+void SettingsGearButton::paintButton(juce::Graphics& g,
+                                     bool shouldDrawButtonAsHighlighted,
+                                     bool shouldDrawButtonAsDown)
+{
+    const bool active = getToggleState();
+    const auto bounds = getLocalBounds().toFloat().reduced(1.5f);
+    juce::Colour bg = active ? juce::Colour(0xff2e251a) : palette::darkInk;
+    if (shouldDrawButtonAsDown)
+    {
+        bg = bg.brighter(0.14f);
+    }
+    else if (shouldDrawButtonAsHighlighted)
+    {
+        bg = bg.brighter(0.08f);
+    }
+
+    g.setColour(bg);
+    g.fillRoundedRectangle(bounds, 5.0f);
+    g.setColour(active ? palette::amberLed : juce::Colour(0xff5b5044));
+    g.drawRoundedRectangle(bounds, 5.0f, active ? 1.5f : 1.0f);
+
+    // 8-tooth vector cogwheel centered cleanly inside button
+    const float cx = bounds.getCentreX();
+    const float cy = bounds.getCentreY();
+    const float sz = std::min(bounds.getWidth(), bounds.getHeight());
+    const float rOuter = sz * 0.34f;
+    const float rInner = sz * 0.24f;
+    const float rHole = sz * 0.115f;
+
+    juce::Path gear;
+    gear.setUsingNonZeroWinding(false);
+    constexpr int kTeeth = 8;
+    const float step = juce::MathConstants<float>::twoPi / static_cast<float>(kTeeth);
+    for (int i = 0; i < kTeeth; ++i)
+    {
+        const float aMid = static_cast<float>(i) * step;
+        const float a0 = aMid - step * 0.26f;
+        const float a1 = aMid - step * 0.14f;
+        const float a2 = aMid + step * 0.14f;
+        const float a3 = aMid + step * 0.26f;
+
+        auto pt = [cx, cy](float r, float a)
+        {
+            return juce::Point<float>(cx + r * std::cos(a), cy + r * std::sin(a));
+        };
+        if (i == 0)
+        {
+            gear.startNewSubPath(pt(rInner, a0));
+        }
+        else
+        {
+            gear.lineTo(pt(rInner, a0));
+        }
+        gear.lineTo(pt(rOuter, a1));
+        gear.lineTo(pt(rOuter, a2));
+        gear.lineTo(pt(rInner, a3));
+    }
+    gear.closeSubPath();
+    gear.addEllipse(cx - rHole, cy - rHole, rHole * 2.0f, rHole * 2.0f);
+
+    g.setColour(active ? palette::amberLed : palette::creamText);
+    g.fillPath(gear);
+}
+
+void SettingsBayComponent::paint(juce::Graphics& g)
+{
+    auto drawCard = [&](juce::Rectangle<int> rect, const juce::String& title)
+    {
+        if (rect.isEmpty())
+        {
+            return;
+        }
+        g.setColour(palette::cardBg);
+        g.fillRoundedRectangle(rect.toFloat(), 6.0f);
+        g.setColour(palette::cardBorder);
+        g.drawRoundedRectangle(rect.toFloat().reduced(0.5f), 6.0f, 1.0f);
+
+        auto hdr = rect.withHeight(24).reduced(10, 0);
+        g.setColour(palette::amberLed);
+        g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+        g.drawFittedText(title, hdr, juce::Justification::centredLeft, 1, 0.72f);
+
+        g.setColour(palette::cardBorder);
+        g.drawHorizontalLine(rect.getY() + 25, static_cast<float>(rect.getX() + 8),
+                             static_cast<float>(rect.getRight() - 8));
+    };
+
+    drawCard(midiCardBounds_, "MIDI ROUTING & MANUAL ASSIGNMENT");
+    drawCard(calCardBounds_, "TUNING, EXPRESSION & ROTARY");
+    drawCard(rhythmCardBounds_, "RHYTHMBOX SETTINGS");
+
+    if (!rotarySectionBounds_.isEmpty())
+    {
+        g.setColour(palette::cardBorder);
+        g.drawHorizontalLine(rotarySectionBounds_.getY() - 4,
+                             static_cast<float>(calCardBounds_.getX() + 10),
+                             static_cast<float>(calCardBounds_.getRight() - 10));
+    }
+}
+
+//==============================================================================
 // KE310AudioProcessorEditor
 //==============================================================================
 KE310AudioProcessorEditor::KE310AudioProcessorEditor(KE310AudioProcessor& owner)
     : AudioProcessorEditor(&owner),
-      processor_(owner)
+      processor_(owner),
+      rhythmPanel_(
+          owner.apvts(),
+          nullptr,
+          [this]() { return processor_.readRhythmTelemetry(); },
+          ke310::ui::RhythmboxPanelMode::OrganEmbedded)
 {
     setLookAndFeel(&lookAndFeel_);
 
     initHeaderControls();
     initKnobs();
     initRockerSections();
+
+    addAndMakeVisible(rhythmPanel_);
+    settingsBay_.setLookAndFeel(&lookAndFeel_);
+    addChildComponent(settingsBay_);
     initMidiAndCalibrationBay();
+
+    setSettingsVisible(false);
 
     setResizable(true, true);
     setResizeLimits(1000, 640, 1600, 1020);
@@ -667,7 +787,17 @@ KE310AudioProcessorEditor::~KE310AudioProcessorEditor()
     buttonAttachments_.clear();
     sliderAttachments_.clear();
     comboAttachments_.clear();
+    settingsBay_.setLookAndFeel(nullptr);
     setLookAndFeel(nullptr);
+}
+
+void KE310AudioProcessorEditor::setSettingsVisible(bool visible)
+{
+    settingsOpen_ = visible;
+    settingsBtn_.setToggleState(visible, juce::dontSendNotification);
+    rhythmPanel_.setVisible(!visible);
+    settingsBay_.setVisible(visible);
+    repaint(lowerBayBounds_);
 }
 
 void KE310AudioProcessorEditor::initHeaderControls()
@@ -707,12 +837,14 @@ void KE310AudioProcessorEditor::initHeaderControls()
         }
     };
     allOffBtn_.onClick = [this] { clearAllTabs(); };
+    settingsBtn_.onClick = [this] { setSettingsVisible(settingsBtn_.getToggleState()); };
 
     addAndMakeVisible(prevPresetBtn_);
     addAndMakeVisible(presetBox_);
     addAndMakeVisible(nextPresetBtn_);
     addAndMakeVisible(allOffBtn_);
     addAndMakeVisible(telemetry_);
+    addAndMakeVisible(settingsBtn_);
 }
 
 void KE310AudioProcessorEditor::initKnobs()
@@ -845,71 +977,77 @@ void KE310AudioProcessorEditor::initMidiAndCalibrationBay()
 
     auto initCombo = [&](juce::Label& lbl, juce::ComboBox& box, const char* paramId)
     {
-        lbl.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+        lbl.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
         lbl.setJustificationType(juce::Justification::centredLeft);
-        addAndMakeVisible(lbl);
+        settingsBay_.addAndMakeVisible(lbl);
 
         if (const auto* choiceParam = dynamic_cast<juce::AudioParameterChoice*>(apvts.getParameter(paramId)))
         {
             box.addItemList(choiceParam->choices, 1);
         }
-        addAndMakeVisible(box);
+        settingsBay_.addAndMakeVisible(box);
         comboAttachments_.push_back(
             std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(apvts, paramId, box));
     };
 
-    auto initHSlider = [&](juce::Label& lbl, juce::Slider& slider, const char* paramId, int decimals)
+    auto initHSlider = [&](juce::Label& lbl, juce::Slider& slider, const char* paramId, int decimals, int textBoxW)
     {
-        lbl.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+        lbl.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
         lbl.setJustificationType(juce::Justification::centredLeft);
-        addAndMakeVisible(lbl);
+        settingsBay_.addAndMakeVisible(lbl);
 
-        slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 44, 18);
+        slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, textBoxW, 18);
         slider.setNumDecimalPlacesToDisplay(decimals);
-        addAndMakeVisible(slider);
+        settingsBay_.addAndMakeVisible(slider);
         sliderAttachments_.push_back(
             std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, paramId, slider));
     };
 
     auto initToggle = [&](juce::ToggleButton& btn, const char* paramId)
     {
-        addAndMakeVisible(btn);
+        settingsBay_.addAndMakeVisible(btn);
         buttonAttachments_.push_back(
             std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(apvts, paramId, btn));
     };
 
-    // Row 4 Left: MIDI Routing
+    // Card 1: MIDI Routing & Manual Assignment
     initCombo(midiModeLbl_, midiModeBox_, param_ids::midiMode);
     initCombo(splitInputChLbl_, splitInputChBox_, param_ids::splitInputCh);
     initCombo(upperChLbl_, upperChBox_, param_ids::upperMidiCh);
     initCombo(lowerChLbl_, lowerChBox_, param_ids::lowerMidiCh);
     initCombo(pedalChLbl_, pedalChBox_, param_ids::pedalMidiCh);
 
-    initHSlider(upperOctLbl_, upperOctSlider_, param_ids::upperOctave, 0);
-    initHSlider(lowerOctLbl_, lowerOctSlider_, param_ids::lowerOctave, 0);
-    initHSlider(pedalOctLbl_, pedalOctSlider_, param_ids::pedalOctave, 0);
-    initHSlider(pedalSplitMaxLbl_, pedalSplitMaxSlider_, param_ids::pedalSplitMax, 0);
-    initHSlider(lowerSplitMaxLbl_, lowerSplitMaxSlider_, param_ids::lowerSplitMax, 0);
+    initHSlider(upperOctLbl_, upperOctSlider_, param_ids::upperOctave, 0, 34);
+    initHSlider(lowerOctLbl_, lowerOctSlider_, param_ids::lowerOctave, 0, 34);
+    initHSlider(pedalOctLbl_, pedalOctSlider_, param_ids::pedalOctave, 0, 34);
+    initHSlider(pedalSplitMaxLbl_, pedalSplitMaxSlider_, param_ids::pedalSplitMax, 0, 38);
+    initHSlider(lowerSplitMaxLbl_, lowerSplitMaxSlider_, param_ids::lowerSplitMax, 0, 38);
 
     initToggle(foldPedalBtn_, param_ids::foldPedalOctave);
     initToggle(clampKeyRangeBtn_, param_ids::clampKeyRange);
 
-    // Row 4 Right: Tuning, Expression & Rotary
+    // Card 2: Tuning, Expression & Rotary
     initToggle(exprLoudnessBtn_, param_ids::expressionLoudnessComp);
-    initHSlider(a4HzLbl_, a4HzSlider_, param_ids::a4Hz, 2);
+    initHSlider(a4HzLbl_, a4HzSlider_, param_ids::a4Hz, 2, 46);
 
     rotaryHeaderLbl_.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
     rotaryHeaderLbl_.setColour(juce::Label::textColourId, palette::amberLed);
     rotaryHeaderLbl_.setJustificationType(juce::Justification::centredLeft);
-    addAndMakeVisible(rotaryHeaderLbl_);
+    settingsBay_.addAndMakeVisible(rotaryHeaderLbl_);
 
     rotaryStatusLbl_.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
     rotaryStatusLbl_.setColour(juce::Label::textColourId, palette::mutedText);
     rotaryStatusLbl_.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(rotaryStatusLbl_);
+    settingsBay_.addAndMakeVisible(rotaryStatusLbl_);
 
-    initHSlider(rotarySlowLbl_, rotarySlowSlider_, param_ids::rotarySlowHz, 2);
-    initHSlider(rotaryFastLbl_, rotaryFastSlider_, param_ids::rotaryFastHz, 2);
+    initHSlider(rotarySlowLbl_, rotarySlowSlider_, param_ids::rotarySlowHz, 2, 46);
+    initHSlider(rotaryFastLbl_, rotaryFastSlider_, param_ids::rotaryFastHz, 2, 46);
+
+    // Card 3: Rhythmbox Settings
+    initCombo(rbSyncModeLbl_, rbSyncModeBox_, ke310::rhythmbox_plugin::param_ids::rbSyncMode);
+    initCombo(rbMidiChLbl_, rbMidiChBox_, ke310::rhythmbox_plugin::param_ids::rbMidiCh);
+    initCombo(rbOutputBusLbl_, rbOutputBusBox_, param_ids::rbOutputBus);
+    initHSlider(rbDriftLbl_, rbDriftSlider_, ke310::rhythmbox_plugin::param_ids::rbAnalogDrift, 2, 44);
 }
 
 void KE310AudioProcessorEditor::clearAllTabs()
@@ -1042,37 +1180,6 @@ void KE310AudioProcessorEditor::paint(juce::Graphics& g)
         g.setColour(palette::silverTrim.withAlpha(0.55f));
         g.fillRect(tabConsoleBounds_.getX(), tabConsoleBounds_.getBottom() - 2, tabConsoleBounds_.getWidth(), 2);
     }
-
-    // Row 4: MIDI Routing & Tuning/Expression Cards
-    {
-        auto drawCard = [&](juce::Rectangle<int> rect, const juce::String& title)
-        {
-            g.setColour(palette::cardBg);
-            g.fillRoundedRectangle(rect.toFloat(), 6.0f);
-            g.setColour(palette::cardBorder);
-            g.drawRoundedRectangle(rect.toFloat().reduced(0.5f), 6.0f, 1.0f);
-
-            auto hdr = rect.withHeight(24).reduced(10, 0);
-            g.setColour(palette::amberLed);
-            g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
-            g.drawText(title, hdr, juce::Justification::centredLeft, false);
-
-            g.setColour(palette::cardBorder);
-            g.drawHorizontalLine(rect.getY() + 25, static_cast<float>(rect.getX() + 8),
-                                 static_cast<float>(rect.getRight() - 8));
-        };
-
-        drawCard(midiCardBounds_, "MIDI ROUTING & MANUAL ASSIGNMENT");
-        drawCard(calCardBounds_, "TUNING, EXPRESSION & ROTARY");
-
-        if (!rotarySectionBounds_.isEmpty())
-        {
-            g.setColour(palette::cardBorder);
-            g.drawHorizontalLine(rotarySectionBounds_.getY() - 4,
-                                 static_cast<float>(calCardBounds_.getX() + 10),
-                                 static_cast<float>(calCardBounds_.getRight() - 10));
-        }
-    }
 }
 
 void KE310AudioProcessorEditor::resized()
@@ -1094,7 +1201,11 @@ void KE310AudioProcessorEditor::resized()
         auto row = headerBounds_.reduced(10, 6);
         row.removeFromLeft(210); // emblem space
 
-        const int stripW = std::min(430, std::max(270, row.getWidth() / 2));
+        const int gearSz = std::min(34, row.getHeight());
+        settingsBtn_.setBounds(row.removeFromRight(gearSz).withSizeKeepingCentre(gearSz, gearSz));
+        row.removeFromRight(6);
+
+        const int stripW = std::min(430, std::max(260, row.getWidth() / 2));
         auto controls = row.removeFromLeft(stripW).reduced(0, 7);
         prevPresetBtn_.setBounds(controls.removeFromLeft(26).reduced(1, 1));
         allOffBtn_.setBounds(controls.removeFromRight(62).reduced(2, 1));
@@ -1192,27 +1303,37 @@ void KE310AudioProcessorEditor::resized()
         layoutTier(1, tabTier1Bounds_);
     }
 
-    // Row 4 Lower Bay: Expanded MIDI Card (left 70%) + Tuning & Expression Card (right 30%)
+    // Row 4 Lower Bay: Embedded KE Rhythmbox OR 3-card Settings Bay
     {
-        auto bay = lowerBayBounds_.reduced(10, 8);
-        const int midiW = (bay.getWidth() * 70) / 100;
-        midiCardBounds_ = bay.removeFromLeft(midiW);
-        bay.removeFromLeft(10);
-        calCardBounds_ = bay;
+        const auto bayContent = lowerBayBounds_.reduced(10, 6);
+        rhythmPanel_.setBounds(bayContent);
+        settingsBay_.setBounds(bayContent);
 
-        // MIDI Card internals
+        auto bay = settingsBay_.getLocalBounds();
+        constexpr int kCardGap = 8;
+        const int cardsW = std::max(300, bay.getWidth() - kCardGap * 2);
+        const int midiW = (cardsW * 51) / 100;
+        const int calW = (cardsW * 24) / 100;
+
+        midiCardBounds_ = bay.removeFromLeft(midiW);
+        bay.removeFromLeft(kCardGap);
+        calCardBounds_ = bay.removeFromLeft(calW);
+        bay.removeFromLeft(kCardGap);
+        rhythmSettingsCardBounds_ = bay;
+
+        // Card 1: MIDI Routing internals
         {
-            auto m = midiCardBounds_.reduced(10, 6);
-            m.removeFromTop(24); // title header
+            auto m = midiCardBounds_.reduced(8, 5);
+            m.removeFromTop(23); // title header
             const int stepH = std::max(24, m.getHeight() / 5);
 
             auto rowA = m.removeFromTop(stepH).reduced(0, 2);
             {
                 auto halfL = rowA.removeFromLeft(rowA.getWidth() / 2).reduced(2, 0);
                 auto halfR = rowA.reduced(2, 0);
-                midiModeLbl_.setBounds(halfL.removeFromLeft(78));
+                midiModeLbl_.setBounds(halfL.removeFromLeft(68));
                 midiModeBox_.setBounds(halfL);
-                splitInputChLbl_.setBounds(halfR.removeFromLeft(94));
+                splitInputChLbl_.setBounds(halfR.removeFromLeft(58));
                 splitInputChBox_.setBounds(halfR);
             }
 
@@ -1222,11 +1343,11 @@ void KE310AudioProcessorEditor::resized()
                 auto c1 = rowB.removeFromLeft(thirdW).reduced(2, 0);
                 auto c2 = rowB.removeFromLeft(thirdW).reduced(2, 0);
                 auto c3 = rowB.reduced(2, 0);
-                upperChLbl_.setBounds(c1.removeFromLeft(60));
+                upperChLbl_.setBounds(c1.removeFromLeft(44));
                 upperChBox_.setBounds(c1);
-                lowerChLbl_.setBounds(c2.removeFromLeft(60));
+                lowerChLbl_.setBounds(c2.removeFromLeft(44));
                 lowerChBox_.setBounds(c2);
-                pedalChLbl_.setBounds(c3.removeFromLeft(58));
+                pedalChLbl_.setBounds(c3.removeFromLeft(42));
                 pedalChBox_.setBounds(c3);
             }
 
@@ -1236,11 +1357,11 @@ void KE310AudioProcessorEditor::resized()
                 auto c1 = rowC.removeFromLeft(thirdW).reduced(2, 0);
                 auto c2 = rowC.removeFromLeft(thirdW).reduced(2, 0);
                 auto c3 = rowC.reduced(2, 0);
-                upperOctLbl_.setBounds(c1.removeFromLeft(64));
+                upperOctLbl_.setBounds(c1.removeFromLeft(48));
                 upperOctSlider_.setBounds(c1);
-                lowerOctLbl_.setBounds(c2.removeFromLeft(64));
+                lowerOctLbl_.setBounds(c2.removeFromLeft(48));
                 lowerOctSlider_.setBounds(c2);
-                pedalOctLbl_.setBounds(c3.removeFromLeft(60));
+                pedalOctLbl_.setBounds(c3.removeFromLeft(50));
                 pedalOctSlider_.setBounds(c3);
             }
 
@@ -1248,46 +1369,76 @@ void KE310AudioProcessorEditor::resized()
             {
                 auto halfL = rowD.removeFromLeft(rowD.getWidth() / 2).reduced(2, 0);
                 auto halfR = rowD.reduced(2, 0);
-                pedalSplitMaxLbl_.setBounds(halfL.removeFromLeft(94));
+                pedalSplitMaxLbl_.setBounds(halfL.removeFromLeft(70));
                 pedalSplitMaxSlider_.setBounds(halfL);
-                lowerSplitMaxLbl_.setBounds(halfR.removeFromLeft(96));
+                lowerSplitMaxLbl_.setBounds(halfR.removeFromLeft(72));
                 lowerSplitMaxSlider_.setBounds(halfR);
             }
 
             auto rowE = m.reduced(0, 2);
             {
-                auto halfL = rowE.removeFromLeft(rowE.getWidth() * 40 / 100);
+                auto halfL = rowE.removeFromLeft((rowE.getWidth() * 42) / 100);
                 foldPedalBtn_.setBounds(halfL);
                 clampKeyRangeBtn_.setBounds(rowE);
             }
         }
 
-        // Tuning, Expression & Rotary Card internals
+        // Card 2: Tuning, Expression & Rotary internals
         {
-            auto c = calCardBounds_.reduced(10, 6);
-            c.removeFromTop(26); // title header
+            auto c = calCardBounds_.reduced(8, 5);
+            c.removeFromTop(25); // title header
             exprLoudnessBtn_.setBounds(c.removeFromTop(24));
-            c.removeFromTop(6);
+            c.removeFromTop(5);
             auto a4Row = c.removeFromTop(26).reduced(0, 2);
-            a4HzLbl_.setBounds(a4Row.removeFromLeft(108));
+            a4HzLbl_.setBounds(a4Row.removeFromLeft(90));
             a4HzSlider_.setBounds(a4Row);
 
             c.removeFromTop(10);
-            rotarySectionBounds_ = c.removeFromTop(20);
+            rotarySectionBounds_ = c.removeFromTop(18);
             auto rHdr = rotarySectionBounds_;
-            rotaryHeaderLbl_.setBounds(rHdr.removeFromLeft((rHdr.getWidth() * 45) / 100));
+            rotaryHeaderLbl_.setBounds(rHdr.removeFromLeft((rHdr.getWidth() * 48) / 100));
             rotaryStatusLbl_.setBounds(rHdr);
 
             c.removeFromTop(4);
             auto slowRow = c.removeFromTop(26).reduced(0, 2);
-            rotarySlowLbl_.setBounds(slowRow.removeFromLeft(108));
+            rotarySlowLbl_.setBounds(slowRow.removeFromLeft(90));
             rotarySlowSlider_.setBounds(slowRow);
 
             c.removeFromTop(4);
             auto fastRow = c.removeFromTop(26).reduced(0, 2);
-            rotaryFastLbl_.setBounds(fastRow.removeFromLeft(108));
+            rotaryFastLbl_.setBounds(fastRow.removeFromLeft(90));
             rotaryFastSlider_.setBounds(fastRow);
         }
+
+        // Card 3: Rhythmbox Settings internals
+        {
+            auto r = rhythmSettingsCardBounds_.reduced(8, 5);
+            r.removeFromTop(25); // title header
+            const int rowH = 26;
+            const int gapY = 6;
+            const int lblW = 90;
+
+            auto row1 = r.removeFromTop(rowH).reduced(0, 1);
+            rbSyncModeLbl_.setBounds(row1.removeFromLeft(lblW));
+            rbSyncModeBox_.setBounds(row1);
+            r.removeFromTop(gapY);
+
+            auto row2 = r.removeFromTop(rowH).reduced(0, 1);
+            rbMidiChLbl_.setBounds(row2.removeFromLeft(lblW));
+            rbMidiChBox_.setBounds(row2);
+            r.removeFromTop(gapY);
+
+            auto row3 = r.removeFromTop(rowH).reduced(0, 1);
+            rbOutputBusLbl_.setBounds(row3.removeFromLeft(lblW));
+            rbOutputBusBox_.setBounds(row3);
+            r.removeFromTop(gapY);
+
+            auto row4 = r.removeFromTop(rowH).reduced(0, 1);
+            rbDriftLbl_.setBounds(row4.removeFromLeft(lblW));
+            rbDriftSlider_.setBounds(row4);
+        }
+
+        settingsBay_.setCardBounds(midiCardBounds_, calCardBounds_, rotarySectionBounds_, rhythmSettingsCardBounds_);
     }
 }
 

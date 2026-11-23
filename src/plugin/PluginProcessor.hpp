@@ -5,10 +5,12 @@
 #include "dsp/KE310Engine.hpp"
 #include "dsp/MidiRouter.hpp"
 #include "dsp/RotarySpeaker.hpp"
+#include "dsp/rhythmbox/RhythmboxEngine.hpp"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
 namespace ke310::plugin
@@ -54,19 +56,29 @@ public:
     int activeUpperNotes() const noexcept { return upperActiveNotes_.load(std::memory_order_relaxed); }
     int activeLowerNotes() const noexcept { return lowerActiveNotes_.load(std::memory_order_relaxed); }
     int activePedalMidi() const noexcept { return pedalActiveMidi_.load(std::memory_order_relaxed); }
+    ke310::rhythmbox::RhythmboxTelemetry readRhythmTelemetry() const noexcept;
 
 private:
     void syncEngineAndMidiState(const dsp::KE310State& baseState, const dsp::MidiRouterConfig& midiCfg) noexcept;
     void handleMidiController(int channel, int ccNumber, int value, const dsp::MidiRouterConfig& midiCfg) noexcept;
-    void renderChunk(int startSample, int numSamples, juce::AudioBuffer<float>& buffer) noexcept;
+    bool updateRhythmGateState(bool rhythmArmed, bool hasPattern, bool breakOn) noexcept;
+    void renderChunk(int startSample,
+                     int numSamples,
+                     juce::AudioBuffer<float>& buffer,
+                     const ke310::rhythmbox::HostTransportInfo& host,
+                     int rhythmOutputMode) noexcept;
 
     juce::AudioProcessorValueTreeState apvts_;
     CachedParameterPointers rawParams_{};
     int currentProgram_ = 0;
+    double sampleRate_ = 48000.0;
 
     dsp::KE310Engine engine_{};
     dsp::MidiRouter midiRouter_{};
     dsp::RotaryDrumSpeaker rotarySpeaker_{};
+    ke310::rhythmbox::RhythmboxEngine rhythmbox_{};
+    bool rhythmLatchedRunning_ = false;
+    bool prevRhythmTriggerHeld_ = false;
 
     // Real-time MIDI CC overrides combined seamlessly with APVTS state
     double cc11Expression_ = 1.0;
@@ -81,6 +93,9 @@ private:
     std::vector<float> rotorLScratch_;
     std::vector<float> rotorRScratch_;
     std::vector<float> statScratch_;
+    std::vector<double> rhythmMonoScratch_;
+    std::vector<float> statOutScratch_;
+    std::vector<float> rhythmOutScratch_;
 
     std::atomic<float> mainRms_{0.0f};
     std::atomic<float> rotorRms_{0.0f};
@@ -89,6 +104,11 @@ private:
     std::atomic<int> upperActiveNotes_{0};
     std::atomic<int> lowerActiveNotes_{0};
     std::atomic<int> pedalActiveMidi_{-1};
+
+    std::atomic<float> rbTelRms_{0.0f};
+    std::atomic<float> rbTelPeak_{0.0f};
+    std::atomic<float> rbTelBpm_{106.8f};
+    std::atomic<std::uint32_t> rbTelPacked_{0u};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(KE310AudioProcessor)
 };

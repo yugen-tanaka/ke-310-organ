@@ -2,6 +2,7 @@
 
 #include "PluginParams.hpp"
 #include "PluginProcessor.hpp"
+#include "ui/RhythmboxPanel.hpp"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -127,6 +128,46 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TelemetryDisplay)
 };
 
+class SettingsGearButton final : public juce::ToggleButton
+{
+public:
+    SettingsGearButton();
+
+    void paintButton(juce::Graphics& g,
+                     bool shouldDrawButtonAsHighlighted,
+                     bool shouldDrawButtonAsDown) override;
+
+private:
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsGearButton)
+};
+
+class SettingsBayComponent final : public juce::Component
+{
+public:
+    SettingsBayComponent() = default;
+
+    void setCardBounds(juce::Rectangle<int> midiBounds,
+                       juce::Rectangle<int> calBounds,
+                       juce::Rectangle<int> rotarySectionBounds,
+                       juce::Rectangle<int> rhythmBounds) noexcept
+    {
+        midiCardBounds_ = midiBounds;
+        calCardBounds_ = calBounds;
+        rotarySectionBounds_ = rotarySectionBounds;
+        rhythmCardBounds_ = rhythmBounds;
+    }
+
+    void paint(juce::Graphics& g) override;
+
+private:
+    juce::Rectangle<int> midiCardBounds_;
+    juce::Rectangle<int> calCardBounds_;
+    juce::Rectangle<int> rotarySectionBounds_;
+    juce::Rectangle<int> rhythmCardBounds_;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsBayComponent)
+};
+
 class KE310AudioProcessorEditor final : public juce::AudioProcessorEditor,
                                         private juce::Timer
 {
@@ -136,6 +177,11 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+
+    void setSettingsVisible(bool visible);
+    bool isSettingsVisible() const noexcept { return settingsOpen_; }
+    SettingsGearButton& settingsButton() noexcept { return settingsBtn_; }
+    ke310::ui::RhythmboxPanel& rhythmPanel() noexcept { return rhythmPanel_; }
 
 private:
     struct KnobSlot
@@ -178,6 +224,8 @@ private:
     juce::TextButton nextPresetBtn_{">"};
     juce::TextButton allOffBtn_{"ALL OFF"};
     TelemetryDisplay telemetry_;
+    SettingsGearButton settingsBtn_;
+    bool settingsOpen_ = false;
 
     // Row 2: 10 hardware rotary knobs
     std::vector<KnobSlot> knobs_;
@@ -186,34 +234,40 @@ private:
     std::vector<TabGroup> tabGroups_;
     std::vector<const char*> allTabParamIds_;
 
-    // Row 4 Left: MIDI Routing & Manual Assignment (12 parameters)
+    // Row 4 Default View: Embedded KE Rhythmbox deck
+    ke310::ui::RhythmboxPanel rhythmPanel_;
+
+    // Row 4 Alt View (toggled via Header Gear Button): Settings Bay (3 cards)
+    SettingsBayComponent settingsBay_;
+
+    // Card 1: MIDI Routing & Manual Assignment (12 parameters)
     juce::Label midiModeLbl_{{}, "MIDI Mode"};
     juce::ComboBox midiModeBox_;
-    juce::Label splitInputChLbl_{{}, "Split Input Ch"};
+    juce::Label splitInputChLbl_{{}, "Split Ch"};
     juce::ComboBox splitInputChBox_;
-    juce::Label upperChLbl_{{}, "Upper Ch"};
+    juce::Label upperChLbl_{{}, "Upper"};
     juce::ComboBox upperChBox_;
-    juce::Label lowerChLbl_{{}, "Lower Ch"};
+    juce::Label lowerChLbl_{{}, "Lower"};
     juce::ComboBox lowerChBox_;
-    juce::Label pedalChLbl_{{}, "Pedal Ch"};
+    juce::Label pedalChLbl_{{}, "Pedal"};
     juce::ComboBox pedalChBox_;
 
-    juce::Label upperOctLbl_{{}, "Upper Oct"};
+    juce::Label upperOctLbl_{{}, "Up Oct"};
     juce::Slider upperOctSlider_{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
-    juce::Label lowerOctLbl_{{}, "Lower Oct"};
+    juce::Label lowerOctLbl_{{}, "Lo Oct"};
     juce::Slider lowerOctSlider_{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
-    juce::Label pedalOctLbl_{{}, "Pedal Oct"};
+    juce::Label pedalOctLbl_{{}, "Ped Oct"};
     juce::Slider pedalOctSlider_{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
-    juce::Label pedalSplitMaxLbl_{{}, "Pedal Max Key"};
+    juce::Label pedalSplitMaxLbl_{{}, "Pedal Max"};
     juce::Slider pedalSplitMaxSlider_{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
-    juce::Label lowerSplitMaxLbl_{{}, "Lower Max Key"};
+    juce::Label lowerSplitMaxLbl_{{}, "Lower Max"};
     juce::Slider lowerSplitMaxSlider_{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
 
     juce::ToggleButton foldPedalBtn_{"Fold Pedal to C2-C3"};
-    juce::ToggleButton clampKeyRangeBtn_{"Clamp Physical Key Range (U:49 / L:49 / P:13)"};
+    juce::ToggleButton clampKeyRangeBtn_{"Clamp Key Range (U:49 / L:49 / P:13)"};
 
-    // Row 4 Right: Tuning, Expression & Rotary
-    juce::ToggleButton exprLoudnessBtn_{"Expression Loudness Comp (450 Hz)"};
+    // Card 2: Tuning, Expression & Rotary
+    juce::ToggleButton exprLoudnessBtn_{"Expr Loudness Comp (450 Hz)"};
 
     juce::Label a4HzLbl_{{}, "Master A4 (Hz)"};
     juce::Slider a4HzSlider_{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
@@ -224,9 +278,18 @@ private:
     juce::Slider rotarySlowSlider_{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
     juce::Label rotaryFastLbl_{{}, "Rotary Fast (Hz)"};
     juce::Slider rotaryFastSlider_{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
-    juce::Rectangle<int> rotarySectionBounds_;
     juce::String lastRotaryStatusText_;
     juce::Colour lastRotaryStatusColour_{0xffb0a798};
+
+    // Card 3: Rhythmbox Settings (Sync Mode, GM MIDI Channel, Output Bus, Analog Drift)
+    juce::Label rbSyncModeLbl_{{}, "Tempo Sync"};
+    juce::ComboBox rbSyncModeBox_;
+    juce::Label rbMidiChLbl_{{}, "Rhythm MIDI Ch"};
+    juce::ComboBox rbMidiChBox_;
+    juce::Label rbOutputBusLbl_{{}, "Output Routing"};
+    juce::ComboBox rbOutputBusBox_;
+    juce::Label rbDriftLbl_{{}, "Analog Drift"};
+    juce::Slider rbDriftSlider_{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
 
     // Cached layout frames for clean paint() pass
     juce::Rectangle<int> headerBounds_;
@@ -237,6 +300,8 @@ private:
     juce::Rectangle<int> lowerBayBounds_;
     juce::Rectangle<int> midiCardBounds_;
     juce::Rectangle<int> calCardBounds_;
+    juce::Rectangle<int> rotarySectionBounds_;
+    juce::Rectangle<int> rhythmSettingsCardBounds_;
 
     // Declared last so attachments unlink before widgets are destroyed
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> buttonAttachments_;

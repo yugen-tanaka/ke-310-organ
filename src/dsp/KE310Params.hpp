@@ -2,6 +2,8 @@
 // Do not edit manually; run `--check` to verify C++ / Python parameter parity.
 #pragma once
 
+#include "FilterTypes.hpp"
+
 #include <array>
 #include <cstddef>
 
@@ -10,19 +12,9 @@ namespace ke310::dsp
 
 inline constexpr const char* kSchemaVersion = "1.3";
 inline constexpr double kReferenceSampleRateHz = 48000.0;
-inline constexpr std::size_t kMaxFilterSections = 4;
 
 enum class Manual : int { Upper = 0, Lower = 1, Pedal = 2 };
 enum class BusRoute : int { Rotor = 0, Stationary = 1 };
-enum class FilterType : int { LP1 = 0, HP1, LP2, HP2, BP2, Peaking, LowShelf, HighShelf };
-
-struct FilterSectionSpec
-{
-    FilterType type = FilterType::LP1;
-    double freqHz = 1000.0;
-    double q = 0.70710678;
-    double gainDb = 0.0;
-};
 
 struct SourceParams
 {

@@ -6,11 +6,22 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+    # Enforce UTF-8 source/execution charset for C/C++ (including JUCE/Catch2) on non-UTF-8 Windows locales such as CP932
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>)
+endif()
+
 add_library(ke310_dsp INTERFACE)
 target_include_directories(ke310_dsp INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
 target_compile_features(ke310_dsp INTERFACE cxx_std_20)
+
+add_library(ke_rhythmbox_dsp INTERFACE)
+target_include_directories(ke_rhythmbox_dsp INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
+target_compile_features(ke_rhythmbox_dsp INTERFACE cxx_std_20)
 
 function(ke310_apply_warnings target_name)
     if(MSVC)
@@ -54,6 +65,7 @@ if(KE310_BUILD_PLUGIN)
     target_sources(KE310Organ PRIVATE
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginEditor.cpp
+        src/ui/RhythmboxPanel.cpp
     )
 
     target_compile_features(KE310Organ PUBLIC cxx_std_20)
@@ -66,6 +78,7 @@ if(KE310_BUILD_PLUGIN)
 
     target_link_libraries(KE310Organ PRIVATE
         ke310_dsp
+        ke_rhythmbox_dsp
         juce::juce_audio_utils
         juce::juce_audio_processors
         juce::juce_recommended_config_flags
@@ -83,10 +96,77 @@ if(KE310_BUILD_PLUGIN)
 
     # Apply strict warnings only to our own plugin source files, not JUCE wrapper code
     if(MSVC)
-        set_source_files_properties(src/plugin/PluginProcessor.cpp src/plugin/PluginEditor.cpp
+        set_source_files_properties(
+            src/plugin/PluginProcessor.cpp
+            src/plugin/PluginEditor.cpp
+            src/ui/RhythmboxPanel.cpp
             PROPERTIES COMPILE_OPTIONS /W4)
     else()
-        set_source_files_properties(src/plugin/PluginProcessor.cpp src/plugin/PluginEditor.cpp
+        set_source_files_properties(
+            src/plugin/PluginProcessor.cpp
+            src/plugin/PluginEditor.cpp
+            src/ui/RhythmboxPanel.cpp
+            PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic;-Wshadow")
+    endif()
+
+    juce_add_plugin(KERhythmbox
+        COMPANY_NAME "Yuguen Organ"
+        IS_SYNTH TRUE
+        NEEDS_MIDI_INPUT TRUE
+        NEEDS_MIDI_OUTPUT FALSE
+        IS_MIDI_EFFECT FALSE
+        EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+        COPY_PLUGIN_AFTER_BUILD FALSE
+        BUNDLE_ID "com.yuguenorgan.kerhythmbox"
+        PLUGIN_MANUFACTURER_CODE YgOr
+        PLUGIN_CODE KRbx
+        FORMATS VST3 AU Standalone
+        PRODUCT_NAME "KE Rhythmbox"
+        ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon_1024.png"
+        ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon_256.png"
+    )
+
+    target_sources(KERhythmbox PRIVATE
+        src/ui/RhythmboxPanel.cpp
+        src/plugin_rhythmbox/RhythmboxProcessor.cpp
+        src/plugin_rhythmbox/RhythmboxEditor.cpp
+    )
+
+    target_compile_features(KERhythmbox PUBLIC cxx_std_20)
+
+    target_compile_definitions(KERhythmbox PUBLIC
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0
+    )
+
+    target_link_libraries(KERhythmbox PRIVATE
+        ke_rhythmbox_dsp
+        juce::juce_audio_utils
+        juce::juce_audio_processors
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_lto_flags
+    )
+
+    if(APPLE)
+        target_compile_options(KERhythmbox PUBLIC
+            -Wno-unknown-warning-option
+            -Wno-nontrivial-memcall
+            -Wno-deprecated-declarations
+        )
+    endif()
+
+    if(MSVC)
+        set_source_files_properties(
+            src/ui/RhythmboxPanel.cpp
+            src/plugin_rhythmbox/RhythmboxProcessor.cpp
+            src/plugin_rhythmbox/RhythmboxEditor.cpp
+            PROPERTIES COMPILE_OPTIONS /W4)
+    else()
+        set_source_files_properties(
+            src/ui/RhythmboxPanel.cpp
+            src/plugin_rhythmbox/RhythmboxProcessor.cpp
+            src/plugin_rhythmbox/RhythmboxEditor.cpp
             PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic;-Wshadow")
     endif()
 endif()
@@ -113,16 +193,37 @@ if(KE310_BUILD_TESTS)
     target_link_libraries(ke310_render_cli PRIVATE ke310_dsp)
     ke310_apply_warnings(ke310_render_cli)
 
+    add_executable(ke_rhythmbox_dsp_tests tests/test_ke_rhythmbox_dsp.cpp)
+    target_link_libraries(ke_rhythmbox_dsp_tests PRIVATE ke_rhythmbox_dsp Catch2::Catch2WithMain)
+    ke310_apply_warnings(ke_rhythmbox_dsp_tests)
+    catch_discover_tests(ke_rhythmbox_dsp_tests)
+
+    add_executable(ke_rhythmbox_render_cli tests/ke_rhythmbox_render_cli.cpp)
+    target_link_libraries(ke_rhythmbox_render_cli PRIVATE ke_rhythmbox_dsp)
+    ke310_apply_warnings(ke_rhythmbox_render_cli)
+
     if(KE310_BUILD_PLUGIN)
         add_executable(ke310_plugin_tests tests/test_ke310_plugin.cpp)
         target_link_libraries(ke310_plugin_tests PRIVATE
             KE310Organ
             ke310_dsp
+            ke_rhythmbox_dsp
             juce::juce_audio_processors
             juce::juce_gui_basics
             Catch2::Catch2WithMain
         )
         ke310_apply_warnings(ke310_plugin_tests)
         catch_discover_tests(ke310_plugin_tests)
+
+        add_executable(ke_rhythmbox_plugin_tests tests/test_ke_rhythmbox_plugin.cpp)
+        target_link_libraries(ke_rhythmbox_plugin_tests PRIVATE
+            KERhythmbox
+            ke_rhythmbox_dsp
+            juce::juce_audio_processors
+            juce::juce_gui_basics
+            Catch2::Catch2WithMain
+        )
+        ke310_apply_warnings(ke_rhythmbox_plugin_tests)
+        catch_discover_tests(ke_rhythmbox_plugin_tests)
     endif()
 endif()

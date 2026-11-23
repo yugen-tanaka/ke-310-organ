@@ -35,10 +35,11 @@ TEST_CASE("Plugin 1. 3-stereo-bus multi-out separation and ENSEMBLE routing", "[
     juce::ScopedJuceInitialiser_GUI juceInit;
     KE310AudioProcessor proc;
 
-    REQUIRE(proc.getBusCount(false) == 3);
+    REQUIRE(proc.getBusCount(false) == 4);
     REQUIRE(proc.getChannelCountOfBus(false, 0) == 2);
     REQUIRE(proc.getChannelCountOfBus(false, 1) == 2);
     REQUIRE(proc.getChannelCountOfBus(false, 2) == 2);
+    REQUIRE(proc.getChannelCountOfBus(false, 3) == 2);
 
     proc.prepareToPlay(48000.0, 512);
     auto& apvts = proc.apvts();
@@ -100,10 +101,10 @@ TEST_CASE("Plugin 2. User-selectable Upper/Lower/Pedal MIDI channels & stuck-not
 
     juce::AudioBuffer<float> buf(proc.getTotalNumOutputChannels(), 512);
 
-    // 1) Unassigned channel (Ch 10) must be ignored cleanly
+    // 1) Unassigned channel (Ch 12, neither organ nor Ch 10 GM drums) must be ignored cleanly
     {
         juce::MidiBuffer midi;
-        midi.addEvent(juce::MidiMessage::noteOn(10, 60, 1.0f), 0);
+        midi.addEvent(juce::MidiMessage::noteOn(12, 60, 1.0f), 0);
         proc.processBlock(buf, midi);
         REQUIRE(busRms(proc, buf, 0) < 1e-6f);
     }
@@ -301,24 +302,28 @@ TEST_CASE("Plugin 5. Custom KE-310 Retro GUI Editor instantiation, APVTS sync & 
 
     std::unique_ptr<juce::AudioProcessorEditor> editor(proc.createEditorIfNeeded());
     REQUIRE(editor != nullptr);
-    REQUIRE(editor->getWidth() == 1200);
-    REQUIRE(editor->getHeight() == 760);
-    REQUIRE(editor->getNumChildComponents() > 50);
+    auto* organEditor = dynamic_cast<KE310AudioProcessorEditor*>(editor.get());
+    REQUIRE(organEditor != nullptr);
+    REQUIRE(organEditor->getWidth() == 1200);
+    REQUIRE(organEditor->getHeight() == 760);
+    REQUIRE(organEditor->getNumChildComponents() > 50);
+    REQUIRE(!organEditor->isSettingsVisible());
+    REQUIRE(organEditor->rhythmPanel().isVisible());
     REQUIRE(TelemetryDisplay::formatVoiceText(0, 0, -1) == "UP:0   LO:0   PED:--");
     REQUIRE(TelemetryDisplay::formatVoiceText(4, 2, 36) == "UP:4   LO:2   PED:C2");
 
-    // Render full GUI offscreen at default resolution
-    juce::Image img(juce::Image::ARGB, editor->getWidth(), editor->getHeight(), true);
+    // Render Main Organ + Embedded Rhythmbox view offscreen at default resolution
+    juce::Image img(juce::Image::ARGB, organEditor->getWidth(), organEditor->getHeight(), true);
     {
         juce::Graphics g(img);
-        editor->paintEntireComponent(g, true);
+        organEditor->paintEntireComponent(g, true);
     }
     REQUIRE(!img.isNull());
     REQUIRE(img.getPixelAt(20, 20) != img.getPixelAt(20, 110));
     REQUIRE(img.getPixelAt(20, 110) != img.getPixelAt(200, 250));
     REQUIRE(img.getPixelAt(20, 110) != img.getPixelAt(200, 420));
 
-    // Export screenshot to research/reports/figures/08_ke310_plugin_gui.png when running inside repo tree
+    // Export main & Settings screenshots to research/reports/figures/ when running inside repo tree
     juce::File probeDir = juce::File::getCurrentWorkingDirectory();
     juce::File reportsDir;
     for (int depth = 0; depth < 4; ++depth)
@@ -331,31 +336,59 @@ TEST_CASE("Plugin 5. Custom KE-310 Retro GUI Editor instantiation, APVTS sync & 
         }
         probeDir = probeDir.getParentDirectory();
     }
-    if (reportsDir.isDirectory())
+
+    auto exportPng = [&](const juce::String& fileName, const juce::Image& srcImg)
     {
+        if (!reportsDir.isDirectory())
+        {
+            return;
+        }
         auto figuresDir = reportsDir.getChildFile("figures");
         figuresDir.createDirectory();
-        auto outPng = figuresDir.getChildFile("08_ke310_plugin_gui.png");
+        auto outPng = figuresDir.getChildFile(fileName);
         outPng.deleteFile();
         juce::FileOutputStream stream(outPng);
         REQUIRE(stream.openedOk());
         juce::PNGImageFormat pngFormat;
-        REQUIRE(pngFormat.writeImageToStream(img, stream));
+        REQUIRE(pngFormat.writeImageToStream(srcImg, stream));
         stream.flush();
         REQUIRE(outPng.existsAsFile());
         REQUIRE(outPng.getSize() > 20000);
-    }
+    };
 
-    // Verify dynamic resizing and re-render cleanly
-    editor->setSize(1024, 640);
-    REQUIRE(editor->getWidth() == 1024);
-    REQUIRE(editor->getHeight() == 640);
-    juce::Image resizedImg(juce::Image::ARGB, editor->getWidth(), editor->getHeight(), true);
+    exportPng("08_ke310_plugin_gui.png", img);
+
+    // Toggle Settings view ON via Gear button state, keep upper knobs & tone levers visible
+    organEditor->setSettingsVisible(true);
+    REQUIRE(organEditor->isSettingsVisible());
+    REQUIRE(!organEditor->rhythmPanel().isVisible());
+    juce::Image settingsImg(juce::Image::ARGB, organEditor->getWidth(), organEditor->getHeight(), true);
     {
-        juce::Graphics rg(resizedImg);
-        editor->paintEntireComponent(rg, true);
+        juce::Graphics sg(settingsImg);
+        organEditor->paintEntireComponent(sg, true);
     }
-    REQUIRE(!resizedImg.isNull());
+    REQUIRE(!settingsImg.isNull());
+    exportPng("09_ke310_plugin_settings_gui.png", settingsImg);
+
+    // Verify dynamic resizing down to 1000x640 minimum in both Main and Settings views
+    organEditor->setSettingsVisible(false);
+    organEditor->setSize(1000, 640);
+    REQUIRE(organEditor->getWidth() == 1000);
+    REQUIRE(organEditor->getHeight() == 640);
+    juce::Image resizedMainImg(juce::Image::ARGB, organEditor->getWidth(), organEditor->getHeight(), true);
+    {
+        juce::Graphics rg(resizedMainImg);
+        organEditor->paintEntireComponent(rg, true);
+    }
+    REQUIRE(!resizedMainImg.isNull());
+
+    organEditor->setSettingsVisible(true);
+    juce::Image resizedSettingsImg(juce::Image::ARGB, organEditor->getWidth(), organEditor->getHeight(), true);
+    {
+        juce::Graphics rsg(resizedSettingsImg);
+        organEditor->paintEntireComponent(rsg, true);
+    }
+    REQUIRE(!resizedSettingsImg.isNull());
 
     editor.reset();
 }
@@ -466,4 +499,163 @@ TEST_CASE("Plugin 6. Built-in Hornless Rotary Speaker switches, stereo bus routi
     REQUIRE(tremParam->getValue() > 0.5f);
     REQUIRE(slowParam->convertFrom0to1(slowParam->getValue()) == Catch::Approx(1.25f).margin(1e-2f));
     REQUIRE(fastParam->convertFrom0to1(fastParam->getValue()) == Catch::Approx(7.20f).margin(1e-2f));
+}
+
+TEST_CASE("Plugin 7. Embedded KE Rhythmbox RHYTHM synchro-start, BREAK gate, ENSEMBLE bypass & GM MIDI", "[plugin][rhythmbox]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+    KE310AudioProcessor proc;
+    proc.prepareToPlay(48000.0, 512);
+    auto& apvts = proc.apvts();
+
+    // Silence organ tone voices so we isolate Rhythmbox routing and gating behavior cleanly
+    setParamUnnorm(apvts, param_ids::upperTibia8, 0.0f);
+    setParamUnnorm(apvts, param_ids::organSilent, 1.0f);
+    setParamUnnorm(apvts, param_ids::ensemble, 1.0f);
+
+    REQUIRE(apvts.getParameter(ke310::rhythmbox_plugin::param_ids::rbMidiCh)->getCurrentValueAsText() == "Ch 10");
+
+    juce::AudioBuffer<float> buf(proc.getTotalNumOutputChannels(), 512);
+    juce::MidiBuffer midi;
+
+    // 1) RHYTHM armed (ROCK I active), BREAK OFF: Upper C4 & Lower C6 (MIDI 84 > C5) must NOT trigger rhythm
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbEnabled, 1.0f);
+    setParamUnnorm(apvts, param_ids::rbBreak, 0.0f);
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbSyncMode, 0.0f); // Internal 106.8 BPM
+
+    midi.addEvent(juce::MidiMessage::noteOn(1, 60, 1.0f), 0);  // Upper C4
+    midi.addEvent(juce::MidiMessage::noteOn(2, 84, 1.0f), 10); // Lower C6 (outside C2..C5)
+    proc.processBlock(buf, midi);
+    REQUIRE(!proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(busRms(proc, buf, 0) < 1e-6f);
+    REQUIRE(busRms(proc, buf, 2) < 1e-6f);
+    REQUIRE(busRms(proc, buf, 3) < 1e-6f);
+
+    midi.clear();
+    midi.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+    midi.addEvent(juce::MidiMessage::noteOff(2, 84), 0);
+    proc.processBlock(buf, midi);
+
+    // 2) Press Lower C3 (Ch 2, MIDI 48 in C2..C5): synchro-start latches rhythm ON even after release!
+    midi.clear();
+    midi.addEvent(juce::MidiMessage::noteOn(2, 48, 1.0f), 0);
+    proc.processBlock(buf, midi);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(busRms(proc, buf, 0) > 0.005f); // Main Mix receives Stationary post-ensemble rhythm
+    REQUIRE(busRms(proc, buf, 1) < 1e-6f);  // ENSEMBLE ON, yet Rotor Out stays completely clean!
+    REQUIRE(busRms(proc, buf, 2) > 0.005f); // Stationary Out carries rhythm in Mode 0
+    REQUIRE(busRms(proc, buf, 3) < 1e-6f);  // Dedicated Rhythm Out stays silent in Mode 0
+
+    midi.clear();
+    midi.addEvent(juce::MidiMessage::noteOff(2, 48), 0);
+    proc.processBlock(buf, midi);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+
+    // Turn RHYTHM OFF -> stops immediately
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbEnabled, 0.0f);
+    midi.clear();
+    proc.processBlock(buf, midi);
+    REQUIRE(!proc.readRhythmTelemetry().lamp.isRunning);
+
+    // Let percussion decay out before testing BREAK gate
+    for (int i = 0; i < 60; ++i)
+    {
+        proc.processBlock(buf, midi);
+    }
+
+    // 3) BREAK ON + RHYTHM ON: plays ONLY while Pedal or Lower (C2..C5) is held, restarting from Beat 1 (step 0)
+    setParamUnnorm(apvts, param_ids::rbBreak, 1.0f);
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbEnabled, 1.0f);
+    proc.processBlock(buf, midi);
+    REQUIRE(!proc.readRhythmTelemetry().lamp.isRunning);
+
+    midi.addEvent(juce::MidiMessage::noteOn(3, 36, 1.0f), 0); // Pedal C2
+    proc.processBlock(buf, midi);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(proc.readRhythmTelemetry().lamp.currentStep == 0);
+    midi.clear();
+    for (int b = 0; b < 25; ++b)
+    {
+        proc.processBlock(buf, midi);
+    }
+    REQUIRE(proc.readRhythmTelemetry().lamp.currentStep > 0);
+
+    // Release Pedal C2 -> stops immediately and resets back to Beat 1 on next press
+    midi.addEvent(juce::MidiMessage::noteOff(3, 36), 0);
+    proc.processBlock(buf, midi);
+    REQUIRE(!proc.readRhythmTelemetry().lamp.isRunning);
+    midi.clear();
+    for (int b = 0; b < 40; ++b)
+    {
+        proc.processBlock(buf, midi);
+    }
+
+    midi.addEvent(juce::MidiMessage::noteOn(2, 72, 1.0f), 0); // Lower C5 (upper edge of C2..C5)
+    proc.processBlock(buf, midi);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(proc.readRhythmTelemetry().lamp.currentStep == 0);
+
+    // 4) Output Routing Modes 1 (Rhythm Out + Main) and 2 (Rhythm Out Isolated)
+    setParamUnnorm(apvts, param_ids::rbOutputBus, 1.0f);
+    midi.clear();
+    proc.processBlock(buf, midi);
+    REQUIRE(busRms(proc, buf, 0) > 0.002f);
+    REQUIRE(busRms(proc, buf, 2) < 1e-6f);
+    REQUIRE(busRms(proc, buf, 3) > 0.002f);
+
+    setParamUnnorm(apvts, param_ids::rbOutputBus, 2.0f);
+    proc.processBlock(buf, midi);
+    REQUIRE(busRms(proc, buf, 0) < 1e-6f);
+    REQUIRE(busRms(proc, buf, 2) < 1e-6f);
+    REQUIRE(busRms(proc, buf, 3) > 0.002f);
+
+    // Release key and stop sequencer cleanly before GM MIDI & state persistence test
+    midi.clear();
+    midi.addEvent(juce::MidiMessage::noteOff(2, 72), 0);
+    midi.addEvent(juce::MidiMessage::allNotesOff(2), 0);
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbEnabled, 0.0f);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    for (int b = 0; b < 80; ++b)
+    {
+        proc.processBlock(buf, midi);
+    }
+
+    // 5) GM MIDI direct drum trigger on Ch 10 vs Ch 12 vs Off (index 17)
+    {
+        juce::MidiBuffer gmMidi;
+        gmMidi.addEvent(juce::MidiMessage::noteOn(10, 36, 1.0f), 0);
+        proc.processBlock(buf, gmMidi);
+        REQUIRE(busRms(proc, buf, 3) > 0.01f);
+
+        setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbMidiCh, 17.0f); // Off (Disabled)
+        for (int b = 0; b < 80; ++b)
+        {
+            proc.processBlock(buf, midi);
+        }
+        proc.processBlock(buf, gmMidi);
+        REQUIRE(busRms(proc, buf, 3) < 1e-5f);
+    }
+
+    // 6) XML state persistence & organ factory preset isolation
+    setParamUnnorm(apvts, param_ids::rbBreak, 1.0f);
+    setParamUnnorm(apvts, param_ids::rbOutputBus, 2.0f);
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbMidiCh, 11.0f); // Ch 11
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::kPatternParamIds[7], 1.0f); // BOSSANOVA
+
+    juce::MemoryBlock stateBlob;
+    proc.getStateInformation(stateBlob);
+
+    proc.setCurrentProgram(5); // Switching organ preset must NOT reset rhythm config!
+    REQUIRE(apvts.getParameter(param_ids::rbBreak)->getValue() > 0.5f);
+    REQUIRE(apvts.getParameter(ke310::rhythmbox_plugin::param_ids::rbMidiCh)->getCurrentValueAsText() == "Ch 11");
+
+    setParamUnnorm(apvts, param_ids::rbBreak, 0.0f);
+    setParamUnnorm(apvts, param_ids::rbOutputBus, 0.0f);
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbMidiCh, 10.0f);
+    proc.setStateInformation(stateBlob.getData(), static_cast<int>(stateBlob.getSize()));
+    REQUIRE(apvts.getParameter(param_ids::rbBreak)->getValue() > 0.5f);
+    REQUIRE(apvts.getParameter(param_ids::rbOutputBus)->getCurrentValueAsText() == "Rhythm Out (Isolated)");
+    REQUIRE(apvts.getParameter(ke310::rhythmbox_plugin::param_ids::rbMidiCh)->getCurrentValueAsText() == "Ch 11");
+    REQUIRE(apvts.getParameter(ke310::rhythmbox_plugin::param_ids::kPatternParamIds[7])->getValue() > 0.5f);
 }
