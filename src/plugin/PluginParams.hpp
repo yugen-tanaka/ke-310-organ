@@ -5,6 +5,7 @@
 #include "dsp/KE310Engine.hpp"
 #include "dsp/MidiRouter.hpp"
 #include "dsp/RotarySpeaker.hpp"
+#include "plugin_rhythmbox/RhythmboxPluginParams.hpp"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -103,7 +104,16 @@ inline constexpr const char* enableSubOctBleed      = "enable_sub_oct_bleed";
 inline constexpr const char* expressionLoudnessComp = "expression_loudness_comp";
 inline constexpr const char* a4Hz                   = "a4_hz";
 inline constexpr const char* analogNoise            = "analog_noise";
+
+// Embedded KE Rhythmbox Organ Controls (2 organ-specific + shared 25 params)
+inline constexpr const char* rbBreak                = "rb_break";
+inline constexpr const char* rbOutputBus            = "rb_output_bus";
 } // namespace param_ids
+
+inline juce::StringArray makeRhythmOutputBusChoices()
+{
+    return {"Stationary (Bypass Ensemble)", "Rhythm Out (+ Main)", "Rhythm Out (Isolated)"};
+}
 
 inline int choiceIndexToMidiChannel(int idx) noexcept
 {
@@ -250,6 +260,13 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     addFloat(param_ids::a4Hz,        "Master Tuning A4 (Hz)", 430.0f, 450.0f, 440.91f, 0.01f);
     addFloat(param_ids::analogNoise, "Main Amp Noise Floor",  0.0f,   1.0f,   0.0f,    0.01f);
 
+    // Embedded KE Rhythmbox parameters (default GM drum trigger channel = Ch 10)
+    ke310::rhythmbox_plugin::addRhythmboxParameters(params, 10);
+    addBool(param_ids::rbBreak, "Rhythm Break", false);
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{param_ids::rbOutputBus, 1}, "Rhythm Output Bus",
+        makeRhythmOutputBusChoices(), 0));
+
     return {params.begin(), params.end()};
 }
 
@@ -331,6 +348,10 @@ struct CachedParameterPointers
     std::atomic<float>* a4Hz = nullptr;
     std::atomic<float>* analogNoise = nullptr;
 
+    ke310::rhythmbox_plugin::CachedRhythmboxParams rhythmbox{};
+    std::atomic<float>* rbBreak = nullptr;
+    std::atomic<float>* rbOutputBus = nullptr;
+
     void bind(const juce::AudioProcessorValueTreeState& apvts) noexcept
     {
         auto g = [&](const char* id) { return apvts.getRawParameterValue(id); };
@@ -409,6 +430,10 @@ struct CachedParameterPointers
         expressionLoudnessComp = g(param_ids::expressionLoudnessComp);
         a4Hz                   = g(param_ids::a4Hz);
         analogNoise            = g(param_ids::analogNoise);
+
+        rhythmbox.bind(apvts);
+        rbBreak                = g(param_ids::rbBreak);
+        rbOutputBus            = g(param_ids::rbOutputBus);
     }
 
     dsp::KE310State readEngineState() const noexcept
@@ -509,6 +534,20 @@ struct CachedParameterPointers
         cfg.slowHz  = d(rotarySlowHz);
         cfg.fastHz  = d(rotaryFastHz);
         return cfg;
+    }
+
+    bool readRhythmBreak() const noexcept
+    {
+        return (rbBreak != nullptr) && (rbBreak->load(std::memory_order_relaxed) >= 0.5f);
+    }
+
+    int readRhythmOutputBus() const noexcept
+    {
+        if (rbOutputBus == nullptr)
+        {
+            return 0;
+        }
+        return std::clamp(static_cast<int>(std::lround(rbOutputBus->load(std::memory_order_relaxed))), 0, 2);
     }
 };
 

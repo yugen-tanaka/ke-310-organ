@@ -217,6 +217,23 @@ public:
 
     int activePedalMidiNote() const noexcept { return pedalActiveMidi_; }
 
+    bool isPedalHeld() const noexcept { return pedalHeld_; }
+
+    bool hasHeldLowerNoteInRange(int minMidi, int maxMidi) const noexcept
+    {
+        const int lo = std::clamp(minMidi, 0, 127);
+        const int hi = std::clamp(maxMidi, lo, 127);
+        for (int m = lo; m <= hi; ++m)
+        {
+            const auto& slot = lowerNotes_[static_cast<std::size_t>(m)];
+            if (slot.active && slot.held)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void noteOn(Manual manual, int midiNote) noexcept
     {
         if (midiNote < 0 || midiNote >= 128)

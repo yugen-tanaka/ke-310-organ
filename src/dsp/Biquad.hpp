@@ -1,7 +1,7 @@
 // Sample-rate-independent RBJ biquad cascades (DF2T) and Cytomic TPT/ZDF SVF filter.
 #pragma once
 
-#include "KE310Params.hpp"
+#include "FilterTypes.hpp"
 
 #include <algorithm>
 #include <array>

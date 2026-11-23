@@ -1,4 +1,4 @@
-name: Build, Validate & Release KE-310 Organ
+name: Build, Validate & Release KE-310 Organ & KE Rhythmbox
 
 on:
   workflow_dispatch:
@@ -38,26 +38,31 @@ jobs:
           unzip -q pluginval.zip -d pluginval_bin
           chmod +x pluginval_bin/pluginval || true
 
-      - name: Validate VST3 with pluginval
+      - name: Validate VST3 plugins with pluginval
         run: |
           PLUGINVAL=$(find pluginval_bin -type f -name "pluginval" | head -n 1)
           chmod +x "$PLUGINVAL"
-          VST3_PATH="build/KE310Organ_artefacts/Release/VST3/KE-310 Organ.vst3"
-          xvfb-run -a "$PLUGINVAL" --strictness-level 5 --validate-in-process --output-dir validation-logs "$VST3_PATH"
+          xvfb-run -a "$PLUGINVAL" --strictness-level 5 --validate-in-process --output-dir validation-logs "build/KE310Organ_artefacts/Release/VST3/KE-310 Organ.vst3"
+          xvfb-run -a "$PLUGINVAL" --strictness-level 5 --validate-in-process --output-dir validation-logs "build/KERhythmbox_artefacts/Release/VST3/KE Rhythmbox.vst3"
 
-      - name: Package Linux release archive
+      - name: Package Linux release archives
         run: |
-          mkdir -p dist_stage dist_out
-          cp -a "build/KE310Organ_artefacts/Release/VST3/KE-310 Organ.vst3" dist_stage/
-          cp -a "build/KE310Organ_artefacts/Release/Standalone/KE-310 Organ" dist_stage/
-          cp README.md LICENSE dist_stage/
-          (cd dist_stage && zip -r ../dist_out/KE-310-Organ-Linux-x64.zip .)
+          mkdir -p dist_stage_ke310 dist_stage_rb dist_out
+          cp -a "build/KE310Organ_artefacts/Release/VST3/KE-310 Organ.vst3" dist_stage_ke310/
+          cp -a "build/KE310Organ_artefacts/Release/Standalone/KE-310 Organ" dist_stage_ke310/
+          cp README.md LICENSE dist_stage_ke310/
+          (cd dist_stage_ke310 && zip -r ../dist_out/KE-310-Organ-Linux-x64.zip .)
 
-      - name: Upload Linux release package
+          cp -a "build/KERhythmbox_artefacts/Release/VST3/KE Rhythmbox.vst3" dist_stage_rb/
+          cp -a "build/KERhythmbox_artefacts/Release/Standalone/KE Rhythmbox" dist_stage_rb/
+          cp README.md LICENSE dist_stage_rb/
+          (cd dist_stage_rb && zip -r ../dist_out/KE-Rhythmbox-Linux-x64.zip .)
+
+      - name: Upload Linux release packages
         uses: actions/upload-artifact@v4
         with:
           name: KE310-Linux-x64-Package
-          path: dist_out/KE-310-Organ-Linux-x64.zip
+          path: dist_out/*.zip
 
       - name: Upload Linux validation logs
         uses: actions/upload-artifact@v4
@@ -86,30 +91,43 @@ jobs:
           curl -fL "https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip" -o pluginval.zip
           unzip -q pluginval.zip -d pluginval_bin
 
-      - name: Validate VST3 & AU with pluginval
+      - name: Validate VST3 & AU plugins with pluginval
         run: |
           PLUGINVAL=$(find pluginval_bin -type f -name "pluginval" -perm +111 | head -n 1)
-          VST3_PATH="build/KE310Organ_artefacts/Release/VST3/KE-310 Organ.vst3"
-          AU_SRC="build/KE310Organ_artefacts/Release/AU/KE-310 Organ.component"
           mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
-          cp -R "$AU_SRC" "$HOME/Library/Audio/Plug-Ins/Components/"
-          "$PLUGINVAL" --strictness-level 5 --validate-in-process --output-dir validation-logs "$VST3_PATH"
-          "$PLUGINVAL" --strictness-level 5 --validate-in-process --output-dir validation-logs "$AU_SRC"
 
-      - name: Package macOS release archive
+          VST3_KE310="build/KE310Organ_artefacts/Release/VST3/KE-310 Organ.vst3"
+          AU_KE310="build/KE310Organ_artefacts/Release/AU/KE-310 Organ.component"
+          cp -R "$AU_KE310" "$HOME/Library/Audio/Plug-Ins/Components/"
+          "$PLUGINVAL" --strictness-level 5 --validate-in-process --output-dir validation-logs "$VST3_KE310"
+          "$PLUGINVAL" --strictness-level 5 --validate-in-process --output-dir validation-logs "$AU_KE310"
+
+          VST3_RB="build/KERhythmbox_artefacts/Release/VST3/KE Rhythmbox.vst3"
+          AU_RB="build/KERhythmbox_artefacts/Release/AU/KE Rhythmbox.component"
+          cp -R "$AU_RB" "$HOME/Library/Audio/Plug-Ins/Components/"
+          "$PLUGINVAL" --strictness-level 5 --validate-in-process --output-dir validation-logs "$VST3_RB"
+          "$PLUGINVAL" --strictness-level 5 --validate-in-process --output-dir validation-logs "$AU_RB"
+
+      - name: Package macOS release archives
         run: |
-          mkdir -p dist_stage dist_out
-          cp -R "build/KE310Organ_artefacts/Release/VST3/KE-310 Organ.vst3" dist_stage/
-          cp -R "build/KE310Organ_artefacts/Release/AU/KE-310 Organ.component" dist_stage/
-          cp -R "build/KE310Organ_artefacts/Release/Standalone/KE-310 Organ.app" dist_stage/
-          cp README.md LICENSE dist_stage/
-          ditto -c -k dist_stage "dist_out/KE-310-Organ-macOS-Universal.zip"
+          mkdir -p dist_stage_ke310 dist_stage_rb dist_out
+          cp -R "build/KE310Organ_artefacts/Release/VST3/KE-310 Organ.vst3" dist_stage_ke310/
+          cp -R "build/KE310Organ_artefacts/Release/AU/KE-310 Organ.component" dist_stage_ke310/
+          cp -R "build/KE310Organ_artefacts/Release/Standalone/KE-310 Organ.app" dist_stage_ke310/
+          cp README.md LICENSE dist_stage_ke310/
+          ditto -c -k dist_stage_ke310 "dist_out/KE-310-Organ-macOS-Universal.zip"
 
-      - name: Upload macOS release package
+          cp -R "build/KERhythmbox_artefacts/Release/VST3/KE Rhythmbox.vst3" dist_stage_rb/
+          cp -R "build/KERhythmbox_artefacts/Release/AU/KE Rhythmbox.component" dist_stage_rb/
+          cp -R "build/KERhythmbox_artefacts/Release/Standalone/KE Rhythmbox.app" dist_stage_rb/
+          cp README.md LICENSE dist_stage_rb/
+          ditto -c -k dist_stage_rb "dist_out/KE-Rhythmbox-macOS-Universal.zip"
+
+      - name: Upload macOS release packages
         uses: actions/upload-artifact@v4
         with:
           name: KE310-macOS-Universal-Package
-          path: dist_out/KE-310-Organ-macOS-Universal.zip
+          path: dist_out/*.zip
 
       - name: Upload macOS validation logs
         uses: actions/upload-artifact@v4
@@ -139,28 +157,37 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip" -OutFile "pluginval.zip"
           Expand-Archive -Path "pluginval.zip" -DestinationPath "pluginval_bin" -Force
 
-      - name: Validate VST3 with pluginval
+      - name: Validate VST3 plugins with pluginval
         shell: pwsh
         run: |
           $pluginval = Get-ChildItem -Path "pluginval_bin" -Filter "pluginval.exe" -Recurse | Select-Object -First 1 -ExpandProperty FullName
-          $vst3 = "build\KE310Organ_artefacts\Release\VST3\KE-310 Organ.vst3"
-          & $pluginval --strictness-level 5 --validate-in-process --output-dir validation-logs "$vst3"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($vst3 in @(
+              "build\KE310Organ_artefacts\Release\VST3\KE-310 Organ.vst3",
+              "build\KERhythmbox_artefacts\Release\VST3\KE Rhythmbox.vst3"
+          )) {
+              & $pluginval --strictness-level 5 --validate-in-process --output-dir validation-logs "$vst3"
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
-      - name: Package Windows release archive
+      - name: Package Windows release archives
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist_stage, dist_out | Out-Null
-          Copy-Item -Recurse "build\KE310Organ_artefacts\Release\VST3\KE-310 Organ.vst3" dist_stage\
-          Copy-Item "build\KE310Organ_artefacts\Release\Standalone\KE-310 Organ.exe" dist_stage\
-          Copy-Item README.md, LICENSE dist_stage\
-          Compress-Archive -Path "dist_stage\*" -DestinationPath "dist_out\KE-310-Organ-Windows-x64.zip" -Force
+          New-Item -ItemType Directory -Force -Path dist_stage_ke310, dist_stage_rb, dist_out | Out-Null
+          Copy-Item -Recurse "build\KE310Organ_artefacts\Release\VST3\KE-310 Organ.vst3" dist_stage_ke310\
+          Copy-Item "build\KE310Organ_artefacts\Release\Standalone\KE-310 Organ.exe" dist_stage_ke310\
+          Copy-Item README.md, LICENSE dist_stage_ke310\
+          Compress-Archive -Path "dist_stage_ke310\*" -DestinationPath "dist_out\KE-310-Organ-Windows-x64.zip" -Force
 
-      - name: Upload Windows release package
+          Copy-Item -Recurse "build\KERhythmbox_artefacts\Release\VST3\KE Rhythmbox.vst3" dist_stage_rb\
+          Copy-Item "build\KERhythmbox_artefacts\Release\Standalone\KE Rhythmbox.exe" dist_stage_rb\
+          Copy-Item README.md, LICENSE dist_stage_rb\
+          Compress-Archive -Path "dist_stage_rb\*" -DestinationPath "dist_out\KE-Rhythmbox-Windows-x64.zip" -Force
+
+      - name: Upload Windows release packages
         uses: actions/upload-artifact@v4
         with:
           name: KE310-Windows-x64-Package
-          path: dist_out/KE-310-Organ-Windows-x64.zip
+          path: dist_out/*.zip
 
       - name: Upload Windows validation logs
         uses: actions/upload-artifact@v4
@@ -197,4 +224,4 @@ jobs:
         with:
           prerelease: ${{ steps.tag_meta.outputs.prerelease == 'true' }}
           generate_release_notes: true
-          files: release-assets/KE-310-Organ-*.zip
+          files: release-assets/*.zip
