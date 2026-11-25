@@ -518,6 +518,123 @@ void PatternPushButton::paintButton(juce::Graphics& g,
 }
 
 //==============================================================================
+// RhythmTransportButton -- Cream Mini-Fill-In Play / Stop Buttons
+//==============================================================================
+RhythmTransportButton::RhythmTransportButton(const juce::String& name,
+                                             IconType icon,
+                                             HoldCallback onHoldChanged)
+    : juce::Button(name),
+      icon_(icon),
+      holdFn_(std::move(onHoldChanged))
+{
+}
+
+void RhythmTransportButton::mouseDown(const juce::MouseEvent& event)
+{
+    if (!event.mods.isPopupMenu())
+    {
+        if (holdFn_)
+        {
+            holdFn_(true);
+        }
+        repaint();
+    }
+    juce::Button::mouseDown(event);
+}
+
+void RhythmTransportButton::mouseUp(const juce::MouseEvent& event)
+{
+    juce::Button::mouseUp(event);
+    if (holdFn_)
+    {
+        holdFn_(false);
+    }
+    repaint();
+}
+
+void RhythmTransportButton::setActiveIndicator(bool active) noexcept
+{
+    if (activeIndicator_ != active)
+    {
+        activeIndicator_ = active;
+        repaint();
+    }
+}
+
+void RhythmTransportButton::paintButton(juce::Graphics& g,
+                                        bool shouldDrawButtonAsHighlighted,
+                                        bool shouldDrawButtonAsDown)
+{
+    const bool held = shouldDrawButtonAsDown || forcedHold_;
+    const bool glow = held || (icon_ == IconType::Play && activeIndicator_);
+    const auto outer = getLocalBounds().toFloat().reduced(1.0f);
+
+    if (glow)
+    {
+        g.setColour((held ? juce::Colour(0xffffb95c) : rb_palette::runLed).withAlpha(held ? 0.30f : 0.22f));
+        g.fillRoundedRectangle(outer.expanded(1.2f), 4.5f);
+    }
+
+    // Dark recessed bezel framing cream cap
+    g.setColour(juce::Colour(0xff11100e));
+    g.fillRoundedRectangle(outer, 3.8f);
+
+    const float pad = held ? 3.0f : 2.1f;
+    const auto cap = outer.reduced(pad);
+    const float capR = 3.2f;
+
+    if (held)
+    {
+        juce::ColourGradient activeGrad(juce::Colour(0xfffff6d6), cap.getCentreX(), cap.getCentreY(),
+                                        juce::Colour(0xffe6ba6e), cap.getX(), cap.getBottom(), true);
+        g.setGradientFill(activeGrad);
+        g.fillRoundedRectangle(cap, capR);
+
+        g.setColour(juce::Colour(0xfffff1ca));
+        g.drawRoundedRectangle(cap, capR, 1.0f);
+    }
+    else
+    {
+        const float boost = shouldDrawButtonAsHighlighted ? 0.06f : 0.0f;
+        juce::ColourGradient creamGrad(juce::Colour(0xfff4efe2).brighter(boost), cap.getX(), cap.getY(),
+                                       juce::Colour(0xffd5cbb5).brighter(boost), cap.getX(), cap.getBottom(), false);
+        g.setGradientFill(creamGrad);
+        g.fillRoundedRectangle(cap, capR);
+
+        g.setColour(activeIndicator_ && icon_ == IconType::Play
+                        ? rb_palette::runLed.withAlpha(0.85f)
+                        : juce::Colour(0xfffffcf4));
+        g.drawRoundedRectangle(cap, capR, (activeIndicator_ && icon_ == IconType::Play) ? 1.2f : 0.9f);
+        g.setColour(juce::Colour(0xff9c8f78).withAlpha(0.45f));
+        g.drawRoundedRectangle(cap.reduced(1.0f), capR - 0.6f, 0.7f);
+    }
+
+    const juce::Colour iconCol = (activeIndicator_ && icon_ == IconType::Play && !held)
+                                     ? juce::Colour(0xff8c1724)
+                                     : juce::Colour(0xff231710);
+    g.setColour(iconCol);
+    const float s = std::min(cap.getWidth(), cap.getHeight());
+    const float cx = cap.getCentreX();
+    const float cy = cap.getCentreY();
+
+    if (icon_ == IconType::Play)
+    {
+        const float r = s * 0.25f;
+        const float shiftX = r * 0.14f;
+        juce::Path tri;
+        tri.addTriangle(cx - r * 0.80f + shiftX, cy - r * 0.96f,
+                        cx + r * 1.00f + shiftX, cy,
+                        cx - r * 0.80f + shiftX, cy + r * 0.96f);
+        g.fillPath(tri);
+    }
+    else
+    {
+        const float side = s * 0.42f;
+        g.fillRoundedRectangle(cx - side * 0.5f, cy - side * 0.5f, side, side, 1.5f);
+    }
+}
+
+//==============================================================================
 // AuditionPadButton
 //==============================================================================
 AuditionPadButton::AuditionPadButton(const juce::String& voiceLabel, int gmMidiNote)
@@ -579,11 +696,15 @@ void AuditionPadButton::paintButton(juce::Graphics& g,
 RhythmboxPanel::RhythmboxPanel(juce::AudioProcessorValueTreeState& apvts,
                                AuditionCallback onAuditionVoice,
                                TelemetryCallback getTelemetry,
-                               RhythmboxPanelMode mode)
+                               RhythmboxPanelMode mode,
+                               HoldCallback onStartHeld,
+                               HoldCallback onStopHeld)
     : apvts_(apvts),
       auditionFn_(std::move(onAuditionVoice)),
       telemetryFn_(std::move(getTelemetry)),
-      mode_(mode)
+      mode_(mode),
+      startHoldFn_(std::move(onStartHeld)),
+      stopHoldFn_(std::move(onStopHeld))
 {
     setLookAndFeel(&lookAndFeel_);
 
@@ -748,10 +869,36 @@ RhythmboxPanel::RhythmboxPanel(juce::AudioProcessorValueTreeState& apvts,
             apvts_, ke310::rhythmbox_plugin::param_ids::rbVariation, *variationSquareBtn_));
 
         rhythmBtn_ = std::make_unique<PatternPushButton>(PatternPushButton::CapColor::Red);
-        rhythmBtn_->setTooltip("Rhythm: ON enables Pedal / Lower (C2-C5) rhythm start; OFF stops rhythm");
+        rhythmBtn_->setTooltip("Rhythm: Master ON/OFF for rhythm function (arms START / Lower / Pedal trigger; OFF stops rhythm)");
         addAndMakeVisible(*rhythmBtn_);
         buttonAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts_, ke310::rhythmbox_plugin::param_ids::rbEnabled, *rhythmBtn_));
+
+        rhythmStartBtn_ = std::make_unique<RhythmTransportButton>(
+            "START",
+            RhythmTransportButton::IconType::Play,
+            [this](bool held)
+            {
+                if (startHoldFn_)
+                {
+                    startHoldFn_(held);
+                }
+            });
+        rhythmStartBtn_->setTooltip("Start Rhythm (Play): Equivalent to Lower (C2-C5) / Pedal trigger; latches when BREAK is OFF or holds Beat 1 when BREAK is ON");
+        addAndMakeVisible(*rhythmStartBtn_);
+
+        rhythmStopBtn_ = std::make_unique<RhythmTransportButton>(
+            "STOP",
+            RhythmTransportButton::IconType::Stop,
+            [this](bool held)
+            {
+                if (stopHoldFn_)
+                {
+                    stopHoldFn_(held);
+                }
+            });
+        rhythmStopBtn_->setTooltip("Stop Rhythm: Equivalent to expression-pedal Rhythm Stop switch; stops rhythm & inhibits start while held (keeps RHYTHM armed)");
+        addAndMakeVisible(*rhythmStopBtn_);
     }
 
     if (telemetryFn_)
@@ -766,6 +913,14 @@ RhythmboxPanel::RhythmboxPanel(juce::AudioProcessorValueTreeState& apvts,
 RhythmboxPanel::~RhythmboxPanel()
 {
     stopTimer();
+    if (startHoldFn_)
+    {
+        startHoldFn_(false);
+    }
+    if (stopHoldFn_)
+    {
+        stopHoldFn_(false);
+    }
     startStopBtn_.setLookAndFeel(nullptr);
     toneSlider_.setLookAndFeel(nullptr);
     volumeSlider_.setLookAndFeel(nullptr);
@@ -931,6 +1086,10 @@ void RhythmboxPanel::timerCallback()
     }
     else
     {
+        if (rhythmStartBtn_)
+        {
+            rhythmStartBtn_->setActiveIndicator(telemetry_.lamp.isRunning);
+        }
         repaint(lampMultiCardBounds_);
         repaint(knobCardBounds_);
     }
@@ -1170,7 +1329,7 @@ void RhythmboxPanel::paintOrganEmbedded(juce::Graphics& g)
         }
     }
 
-    // Section 4: Square Action Buttons (BREAK White, VARIATION Black, RHYTHM Red)
+    // Section 4: Square Action Buttons (BREAK White, VARIATION Black, RHYTHM Red) + START / STOP transport buttons
     drawCard(actionCardBounds_);
     {
         drawSectionBracket(g, actionBracketBounds_, "RHYTHM", 9.5f);
@@ -1188,6 +1347,23 @@ void RhythmboxPanel::paintOrganEmbedded(juce::Graphics& g)
             const bool dimmed = (k == 1 && !variationSupported_);
             g.setColour(dimmed ? rb_palette::mutedText.withAlpha(0.6f) : rb_palette::creamText);
             g.drawFittedText(actionNames[k], actionLabelBounds_[k], juce::Justification::centred, 1, 0.70f);
+        }
+
+        if (!transportWellBounds_.isEmpty())
+        {
+            const auto tw = transportWellBounds_.toFloat();
+            g.setColour(juce::Colour(0xff0c0b0a));
+            g.fillRoundedRectangle(tw, 4.5f);
+            g.setColour(juce::Colour(0xff3b352f));
+            g.drawRoundedRectangle(tw, 4.5f, 1.0f);
+
+            const char* transportNames[2] = {"START", "STOP"};
+            g.setFont(juce::Font(juce::FontOptions(9.2f, juce::Font::bold)));
+            g.setColour(rb_palette::creamText);
+            for (std::size_t k = 0; k < 2; ++k)
+            {
+                g.drawFittedText(transportNames[k], transportLabelBounds_[k], juce::Justification::centred, 1, 0.72f);
+            }
         }
     }
 }
@@ -1319,21 +1495,34 @@ void RhythmboxPanel::resized()
             }
         }
 
-        // 4. 3 Square Action Buttons: BREAK (White), VARIATION (Black), RHYTHM (Red)
+        // 4. 3 Square Action Buttons: BREAK (White), VARIATION (Black), RHYTHM (Red) + START / STOP transport buttons
         {
             auto aInner = actionCardBounds_.reduced(8, 6);
             const int gapX = 6;
             const int maxActSqW = (aInner.getWidth() - 10 - gapX * 2) / 3;
-            const int sq = std::clamp(std::min(matrixSq, maxActSqW), 28, 52);
+            const int maxActSqH = static_cast<int>(std::floor(static_cast<float>(std::max(60, aInner.getHeight() - 70)) / 2.25f));
+            const int sq = std::clamp(std::min({matrixSq, maxActSqW, maxActSqH}), 26, 44);
             const int extrude = static_cast<int>(std::round(static_cast<float>(sq) * 0.42f));
             const int btnH = sq + extrude;
             const int baseOffsetY = static_cast<int>(std::round(static_cast<float>(extrude) * 0.90f));
 
-            const int bracketH = 16;
-            const int bracketGap = 4;
-            const int lblGap = 5;
-            const int lblH = 15;
-            const int totalActH = bracketH + bracketGap + sq + baseOffsetY + 3 + lblGap + lblH;
+            const int bracketH = 15;
+            const int bracketGap = 3;
+            const int lblGap = 4;
+            const int lblH = 13;
+            const int rowGap = 8;
+
+            const int ssSide = std::clamp(sq - 6, 26, 38);
+            const int ssPad = 4;
+            const int ssGap = 6;
+            const int trLblGap = 3;
+            const int trLblH = 13;
+            const int transportBezelW = ssSide * 2 + ssGap + ssPad * 2;
+            const int transportBezelH = ssSide + ssPad * 2;
+
+            const int topBlockH = bracketH + bracketGap + sq + baseOffsetY + 3 + lblGap + lblH;
+            const int botBlockH = transportBezelH + trLblGap + trLblH;
+            const int totalActH = topBlockH + rowGap + botBlockH;
             const int topY = aInner.getY() + std::max(0, (aInner.getHeight() - totalActH) / 2);
 
             const int rowY = topY + bracketH + bracketGap;
@@ -1370,6 +1559,36 @@ void RhythmboxPanel::resized()
             }
 
             actionBracketBounds_ = {varX - 4, topY, std::max(24, (rhyRight - varX) + 8), bracketH};
+
+            const int trWellX = aInner.getCentreX() - transportBezelW / 2;
+            const int trWellY = actionWellBounds_.getBottom() + lblGap + lblH + rowGap;
+            transportWellBounds_ = {trWellX, trWellY, transportBezelW, transportBezelH};
+
+            const int startX = trWellX + ssPad;
+            const int stopX = startX + ssSide + ssGap;
+            const int btnY = trWellY + ssPad;
+            if (rhythmStartBtn_)
+            {
+                rhythmStartBtn_->setBounds(startX, btnY, ssSide, ssSide);
+            }
+            if (rhythmStopBtn_)
+            {
+                rhythmStopBtn_->setBounds(stopX, btnY, ssSide, ssSide);
+            }
+
+            const int trLblW = ssSide + 12;
+            transportLabelBounds_[0] = {
+                std::clamp(startX + ssSide / 2 - trLblW / 2, cardLeft, cardRight - trLblW),
+                transportWellBounds_.getBottom() + trLblGap,
+                trLblW,
+                trLblH
+            };
+            transportLabelBounds_[1] = {
+                std::clamp(stopX + ssSide / 2 - trLblW / 2, cardLeft, cardRight - trLblW),
+                transportWellBounds_.getBottom() + trLblGap,
+                trLblW,
+                trLblH
+            };
         }
         return;
     }

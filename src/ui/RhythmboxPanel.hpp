@@ -96,6 +96,47 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PatternPushButton)
 };
 
+class RhythmTransportButton final : public juce::Button
+{
+public:
+    enum class IconType
+    {
+        Play,
+        Stop
+    };
+
+    using HoldCallback = std::function<void(bool isDown)>;
+
+    RhythmTransportButton(const juce::String& name,
+                          IconType icon,
+                          HoldCallback onHoldChanged = {});
+
+    void mouseDown(const juce::MouseEvent& event) override;
+    void mouseUp(const juce::MouseEvent& event) override;
+    void setActiveIndicator(bool active) noexcept;
+    void triggerHoldForTest(bool isDown)
+    {
+        forcedHold_ = isDown;
+        if (holdFn_)
+        {
+            holdFn_(isDown);
+        }
+        repaint();
+    }
+
+    void paintButton(juce::Graphics& g,
+                     bool shouldDrawButtonAsHighlighted,
+                     bool shouldDrawButtonAsDown) override;
+
+private:
+    IconType icon_ = IconType::Play;
+    bool forcedHold_ = false;
+    bool activeIndicator_ = false;
+    HoldCallback holdFn_;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RhythmTransportButton)
+};
+
 class AuditionPadButton final : public juce::TextButton
 {
 public:
@@ -128,11 +169,14 @@ class RhythmboxPanel final : public juce::Component,
 public:
     using AuditionCallback = std::function<void(ke310::rhythmbox::VoiceId, float)>;
     using TelemetryCallback = std::function<ke310::rhythmbox::RhythmboxTelemetry()>;
+    using HoldCallback = std::function<void(bool held)>;
 
     RhythmboxPanel(juce::AudioProcessorValueTreeState& apvts,
                    AuditionCallback onAuditionVoice,
                    TelemetryCallback getTelemetry,
-                   RhythmboxPanelMode mode = RhythmboxPanelMode::Standalone);
+                   RhythmboxPanelMode mode = RhythmboxPanelMode::Standalone,
+                   HoldCallback onStartHeld = {},
+                   HoldCallback onStopHeld = {});
     ~RhythmboxPanel() override;
 
     void paint(juce::Graphics& g) override;
@@ -147,6 +191,8 @@ public:
     PatternPushButton& breakButton() noexcept { return *breakBtn_; }
     PatternPushButton& variationSquareButton() noexcept { return *variationSquareBtn_; }
     PatternPushButton& rhythmButton() noexcept { return *rhythmBtn_; }
+    RhythmTransportButton& rhythmStartButton() noexcept { return *rhythmStartBtn_; }
+    RhythmTransportButton& rhythmStopButton() noexcept { return *rhythmStopBtn_; }
     void handlePatternPressState(std::size_t idx, bool isPressed);
 
 private:
@@ -163,6 +209,8 @@ private:
     AuditionCallback auditionFn_;
     TelemetryCallback telemetryFn_;
     RhythmboxPanelMode mode_ = RhythmboxPanelMode::Standalone;
+    HoldCallback startHoldFn_;
+    HoldCallback stopHoldFn_;
     RhythmboxLookAndFeel lookAndFeel_;
 
     // Top bar controls (Standalone)
@@ -171,10 +219,12 @@ private:
     // Left 2x8 rhythm matrix
     std::array<std::unique_ptr<PatternPushButton>, ke310::rhythmbox::kNumPatterns> patternButtons_;
 
-    // 3 Square action buttons (OrganEmbedded: BREAK, VARIATION, RHYTHM)
+    // 3 Square action buttons (OrganEmbedded: BREAK, VARIATION, RHYTHM) + START / STOP transport buttons
     std::unique_ptr<PatternPushButton> breakBtn_;
     std::unique_ptr<PatternPushButton> variationSquareBtn_;
     std::unique_ptr<PatternPushButton> rhythmBtn_;
+    std::unique_ptr<RhythmTransportButton> rhythmStartBtn_;
+    std::unique_ptr<RhythmTransportButton> rhythmStopBtn_;
 
     // Right 3 large rotary knobs (TONE, VOLUME, TEMPO)
     juce::Slider toneSlider_{juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox};
@@ -214,6 +264,8 @@ private:
     juce::Rectangle<int> actionWellBounds_;
     juce::Rectangle<int> actionBracketBounds_;
     std::array<juce::Rectangle<int>, 3> actionLabelBounds_{};
+    juce::Rectangle<int> transportWellBounds_;
+    std::array<juce::Rectangle<int>, 2> transportLabelBounds_{};
     juce::Rectangle<int> controlBarBounds_;
     juce::Rectangle<int> padBayBounds_;
     juce::Rectangle<int> padBracketBounds_;
