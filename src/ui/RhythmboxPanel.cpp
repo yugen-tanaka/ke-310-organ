@@ -34,6 +34,17 @@ inline constexpr std::array<const char*, ke310::rhythmbox::kNumPatterns> kHardwa
     "SWING I", "SWING II", "SWING III", "SAMBA", "MAMBO", "BEGUINE", "CHA-CHA", "RHUMBA"
 }};
 
+juce::String formatIsoNoteName(int midiNote)
+{
+    static constexpr std::array<const char*, 12> kNoteNames = {
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+    };
+    const int clamped = std::clamp(midiNote, 0, 127);
+    const int pc = clamped % 12;
+    const int octave = (clamped / 12) - 1;
+    return juce::String(kNoteNames[static_cast<std::size_t>(pc)]) + juce::String(octave);
+}
+
 void drawSectionBracket(juce::Graphics& g,
                         juce::Rectangle<int> area,
                         const juce::String& title,
@@ -280,44 +291,7 @@ void RhythmboxLookAndFeel::drawToggleButton(juce::Graphics& g,
     juce::ignoreUnused(shouldDrawButtonAsDown);
     const auto bounds = button.getLocalBounds().toFloat();
     const bool checked = button.getToggleState();
-
-    // Custom pill switch styling for START / STOP and VARIATION, clean LED checkbox for Multi-Pattern
     const juce::String text = button.getButtonText();
-    const bool isPillButton = text.startsWithIgnoreCase("START") || text.startsWithIgnoreCase("VARIATION");
-
-    if (isPillButton)
-    {
-        const bool isStartStop = text.startsWithIgnoreCase("START");
-        const juce::Colour litCol = isStartStop ? rb_palette::runLed : rb_palette::amberLed;
-        const juce::Colour bg = checked
-                                    ? litCol.withAlpha(shouldDrawButtonAsHighlighted ? 0.30f : 0.22f)
-                                    : juce::Colour(shouldDrawButtonAsHighlighted ? 0xff302b27 : 0xff221f1c);
-        const auto pill = bounds.reduced(1.0f);
-        g.setColour(bg);
-        g.fillRoundedRectangle(pill, 5.0f);
-        g.setColour(checked ? litCol : juce::Colour(0xff5a5046));
-        g.drawRoundedRectangle(pill, 5.0f, checked ? 1.5f : 1.0f);
-
-        // LED dot on the left
-        const float ledR = 4.2f;
-        const float ledCx = pill.getX() + 12.0f;
-        const float ledCy = pill.getCentreY();
-        if (checked)
-        {
-            g.setColour(litCol.withAlpha(0.35f));
-            g.fillEllipse(ledCx - ledR * 1.9f, ledCy - ledR * 1.9f, ledR * 3.8f, ledR * 3.8f);
-        }
-        g.setColour(checked ? litCol.brighter(0.25f) : juce::Colour(0xff4a433d));
-        g.fillEllipse(ledCx - ledR, ledCy - ledR, ledR * 2.0f, ledR * 2.0f);
-
-        g.setColour(button.isEnabled() ? (checked ? juce::Colours::white : rb_palette::creamText)
-                                       : rb_palette::mutedText.withAlpha(0.55f));
-        g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
-        g.drawFittedText(text,
-                         pill.withTrimmedLeft(20.0f).toNearestInt(),
-                         juce::Justification::centred, 1, 0.78f);
-        return;
-    }
 
     const float boxSz = 14.0f;
     const auto boxRect = juce::Rectangle<float>(bounds.getX() + 3.0f,
@@ -642,7 +616,7 @@ AuditionPadButton::AuditionPadButton(const juce::String& voiceLabel, int gmMidiN
       voiceLabel_(voiceLabel),
       gmMidiNote_(gmMidiNote)
 {
-    setTooltip(voiceLabel + " (GM MIDI Note " + juce::String(gmMidiNote) + ")");
+    setTooltip(voiceLabel + " (" + formatIsoNoteName(gmMidiNote) + " / MIDI " + juce::String(gmMidiNote) + ")");
 }
 
 bool AuditionPadButton::decayFlash() noexcept
@@ -685,7 +659,7 @@ void AuditionPadButton::paintButton(juce::Graphics& g,
 
     g.setColour(rb_palette::mutedText.withAlpha(0.75f));
     g.setFont(juce::Font(juce::FontOptions(8.2f, juce::Font::plain)));
-    g.drawText(juce::String(gmMidiNote_),
+    g.drawText(formatIsoNoteName(gmMidiNote_),
                bounds.withTop(bounds.getBottom() - 12.0f).toNearestInt(),
                juce::Justification::centred, false);
 }
@@ -698,13 +672,17 @@ RhythmboxPanel::RhythmboxPanel(juce::AudioProcessorValueTreeState& apvts,
                                TelemetryCallback getTelemetry,
                                RhythmboxPanelMode mode,
                                HoldCallback onStartHeld,
-                               HoldCallback onStopHeld)
+                               HoldCallback onStopHeld,
+                               MidiFlashCallback consumeMidiFlash,
+                               bool isStandaloneApp)
     : apvts_(apvts),
       auditionFn_(std::move(onAuditionVoice)),
       telemetryFn_(std::move(getTelemetry)),
       mode_(mode),
       startHoldFn_(std::move(onStartHeld)),
-      stopHoldFn_(std::move(onStopHeld))
+      stopHoldFn_(std::move(onStopHeld)),
+      midiFlashFn_(std::move(consumeMidiFlash)),
+      isStandaloneApp_(isStandaloneApp)
 {
     setLookAndFeel(&lookAndFeel_);
 
@@ -778,59 +756,70 @@ RhythmboxPanel::RhythmboxPanel(juce::AudioProcessorValueTreeState& apvts,
 
     // Shared Multi-Pattern (Wired-OR) toggle
     multiPatternBtn_.setLookAndFeel(&lookAndFeel_);
-    multiPatternBtn_.setButtonText(mode_ == RhythmboxPanelMode::OrganEmbedded ? "Multi-Pattern" : "Multi-Pattern (Wired-OR)");
+    multiPatternBtn_.setButtonText("Multi-Pattern");
     addAndMakeVisible(multiPatternBtn_);
     buttonAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts_, ke310::rhythmbox_plugin::param_ids::rbMultiPattern, multiPatternBtn_));
     multiPatternBtn_.onClick = [this]() { handleMultiPatternToggle(); };
     multiPatternBtn_.setTooltip("Allow selecting multiple rhythms simultaneously (Wired-OR hardware combinator)");
 
+    // Shared square concave action buttons: BREAK (White), VARIATION (Black), RHYTHM (Red)
+    breakBtn_ = std::make_unique<PatternPushButton>(PatternPushButton::CapColor::White);
+    breakBtn_->setTooltip(mode_ == RhythmboxPanelMode::OrganEmbedded
+                              ? "Break: When RHYTHM is ON, rhythm plays from Beat 1 only while START, Pedal, or Lower (C2-C5) is held"
+                              : "Break: When RHYTHM is ON, rhythm plays from Beat 1 only while START or MIDI Key Start note is held");
+    addAndMakeVisible(*breakBtn_);
+    if (apvts_.getParameter(ke310::rhythmbox_plugin::param_ids::rbBreak) != nullptr)
+    {
+        buttonAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts_, ke310::rhythmbox_plugin::param_ids::rbBreak, *breakBtn_));
+    }
+
+    variationSquareBtn_ = std::make_unique<PatternPushButton>(PatternPushButton::CapColor::Black);
+    variationSquareBtn_->setTooltip("Variation (Not available on Tango / Beguine / Rhumba per KE-310 manual)");
+    addAndMakeVisible(*variationSquareBtn_);
+    buttonAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts_, ke310::rhythmbox_plugin::param_ids::rbVariation, *variationSquareBtn_));
+
+    rhythmBtn_ = std::make_unique<PatternPushButton>(PatternPushButton::CapColor::Red);
+    rhythmBtn_->setTooltip(mode_ == RhythmboxPanelMode::OrganEmbedded
+                               ? "Rhythm: Master ON/OFF for rhythm function (arms START / Lower / Pedal trigger; OFF stops rhythm)"
+                               : "Rhythm: Master ON/OFF for rhythm function (arms START / MIDI Key Start trigger; OFF stops rhythm)");
+    addAndMakeVisible(*rhythmBtn_);
+    buttonAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts_, ke310::rhythmbox_plugin::param_ids::rbEnabled, *rhythmBtn_));
+
+    // Shared cream transport buttons: START (Play) and STOP (Stop)
+    rhythmStartBtn_ = std::make_unique<RhythmTransportButton>(
+        "START",
+        RhythmTransportButton::IconType::Play,
+        [this](bool held)
+        {
+            if (startHoldFn_)
+            {
+                startHoldFn_(held);
+            }
+        });
+    rhythmStartBtn_->setTooltip(mode_ == RhythmboxPanelMode::OrganEmbedded
+                                    ? "Start Rhythm (Play): Equivalent to Lower (C2-C5) / Pedal trigger; latches when BREAK is OFF or holds Beat 1 when BREAK is ON"
+                                    : "Start Rhythm (Play): Latches rhythm when BREAK is OFF or holds Beat 1 when BREAK is ON");
+    addAndMakeVisible(*rhythmStartBtn_);
+
+    rhythmStopBtn_ = std::make_unique<RhythmTransportButton>(
+        "STOP",
+        RhythmTransportButton::IconType::Stop,
+        [this](bool held)
+        {
+            if (stopHoldFn_)
+            {
+                stopHoldFn_(held);
+            }
+        });
+    rhythmStopBtn_->setTooltip("Stop Rhythm: Equivalent to expression-pedal Rhythm Stop switch; stops rhythm & inhibits start while held (keeps RHYTHM armed)");
+    addAndMakeVisible(*rhythmStopBtn_);
+
     if (mode_ == RhythmboxPanelMode::Standalone)
     {
-        startStopBtn_.setLookAndFeel(&lookAndFeel_);
-        addAndMakeVisible(startStopBtn_);
-        buttonAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts_, ke310::rhythmbox_plugin::param_ids::rbEnabled, startStopBtn_));
-
-        variationBtn_.setLookAndFeel(&lookAndFeel_);
-        addAndMakeVisible(variationBtn_);
-        buttonAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts_, ke310::rhythmbox_plugin::param_ids::rbVariation, variationBtn_));
-        variationBtn_.setTooltip("Rhythm Variation (Not available on Tango / Beguine / Rhumba per KE-310 manual)");
-
-        syncLbl_.setJustificationType(juce::Justification::centredRight);
-        syncLbl_.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
-        addAndMakeVisible(syncLbl_);
-
-        syncModeBox_.setLookAndFeel(&lookAndFeel_);
-        syncModeBox_.addItemList(ke310::rhythmbox_plugin::makeSyncModeChoices(), 1);
-        addAndMakeVisible(syncModeBox_);
-        comboAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts_, ke310::rhythmbox_plugin::param_ids::rbSyncMode, syncModeBox_));
-
-        midiChLbl_.setText("MIDI", juce::dontSendNotification);
-        midiChLbl_.setJustificationType(juce::Justification::centredRight);
-        midiChLbl_.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
-        addAndMakeVisible(midiChLbl_);
-
-        midiChBox_.setLookAndFeel(&lookAndFeel_);
-        midiChBox_.addItemList(ke310::rhythmbox_plugin::makeMidiChannelChoices(), 1);
-        addAndMakeVisible(midiChBox_);
-        comboAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts_, ke310::rhythmbox_plugin::param_ids::rbMidiCh, midiChBox_));
-
-        driftLbl_.setJustificationType(juce::Justification::centredRight);
-        driftLbl_.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
-        addAndMakeVisible(driftLbl_);
-
-        driftSlider_.setLookAndFeel(&lookAndFeel_);
-        driftSlider_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 34, 18);
-        driftSlider_.setNumDecimalPlacesToDisplay(2);
-        driftSlider_.setDoubleClickReturnValue(true, 1.0);
-        addAndMakeVisible(driftSlider_);
-        sliderAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            apvts_, ke310::rhythmbox_plugin::param_ids::rbAnalogDrift, driftSlider_));
-
         // Bottom 11 GM Voice Audition Pads
         for (std::size_t v = 0; v < ke310::rhythmbox::kNumVoices; ++v)
         {
@@ -849,56 +838,6 @@ RhythmboxPanel::RhythmboxPanel(juce::AudioProcessorValueTreeState& apvts,
             addAndMakeVisible(*pad);
             padButtons_[v] = std::move(pad);
         }
-    }
-    else
-    {
-        // OrganEmbedded square concave action buttons: BREAK (White), VARIATION (Black), RHYTHM (Red)
-        breakBtn_ = std::make_unique<PatternPushButton>(PatternPushButton::CapColor::White);
-        breakBtn_->setTooltip("Break: When RHYTHM is ON, rhythm plays from Beat 1 only while Pedal or Lower (C2-C5) is held");
-        addAndMakeVisible(*breakBtn_);
-        if (apvts_.getParameter("rb_break") != nullptr)
-        {
-            buttonAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-                apvts_, "rb_break", *breakBtn_));
-        }
-
-        variationSquareBtn_ = std::make_unique<PatternPushButton>(PatternPushButton::CapColor::Black);
-        variationSquareBtn_->setTooltip("Variation (Not available on Tango / Beguine / Rhumba per KE-310 manual)");
-        addAndMakeVisible(*variationSquareBtn_);
-        buttonAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts_, ke310::rhythmbox_plugin::param_ids::rbVariation, *variationSquareBtn_));
-
-        rhythmBtn_ = std::make_unique<PatternPushButton>(PatternPushButton::CapColor::Red);
-        rhythmBtn_->setTooltip("Rhythm: Master ON/OFF for rhythm function (arms START / Lower / Pedal trigger; OFF stops rhythm)");
-        addAndMakeVisible(*rhythmBtn_);
-        buttonAttachments_.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts_, ke310::rhythmbox_plugin::param_ids::rbEnabled, *rhythmBtn_));
-
-        rhythmStartBtn_ = std::make_unique<RhythmTransportButton>(
-            "START",
-            RhythmTransportButton::IconType::Play,
-            [this](bool held)
-            {
-                if (startHoldFn_)
-                {
-                    startHoldFn_(held);
-                }
-            });
-        rhythmStartBtn_->setTooltip("Start Rhythm (Play): Equivalent to Lower (C2-C5) / Pedal trigger; latches when BREAK is OFF or holds Beat 1 when BREAK is ON");
-        addAndMakeVisible(*rhythmStartBtn_);
-
-        rhythmStopBtn_ = std::make_unique<RhythmTransportButton>(
-            "STOP",
-            RhythmTransportButton::IconType::Stop,
-            [this](bool held)
-            {
-                if (stopHoldFn_)
-                {
-                    stopHoldFn_(held);
-                }
-            });
-        rhythmStopBtn_->setTooltip("Stop Rhythm: Equivalent to expression-pedal Rhythm Stop switch; stops rhythm & inhibits start while held (keeps RHYTHM armed)");
-        addAndMakeVisible(*rhythmStopBtn_);
     }
 
     if (telemetryFn_)
@@ -921,16 +860,20 @@ RhythmboxPanel::~RhythmboxPanel()
     {
         stopHoldFn_(false);
     }
-    startStopBtn_.setLookAndFeel(nullptr);
     toneSlider_.setLookAndFeel(nullptr);
     volumeSlider_.setLookAndFeel(nullptr);
     bpmSlider_.setLookAndFeel(nullptr);
-    variationBtn_.setLookAndFeel(nullptr);
     multiPatternBtn_.setLookAndFeel(nullptr);
-    syncModeBox_.setLookAndFeel(nullptr);
-    midiChBox_.setLookAndFeel(nullptr);
-    driftSlider_.setLookAndFeel(nullptr);
     setLookAndFeel(nullptr);
+}
+
+void RhythmboxPanel::setStandaloneAppMode(bool standalone) noexcept
+{
+    if (isStandaloneApp_ != standalone)
+    {
+        isStandaloneApp_ = standalone;
+        repaint();
+    }
 }
 
 void RhythmboxPanel::setParameterBoolNotifyingHost(const char* paramId, bool value)
@@ -1059,15 +1002,25 @@ void RhythmboxPanel::timerCallback()
     if (newVarSupported != variationSupported_)
     {
         variationSupported_ = newVarSupported;
-        if (mode_ == RhythmboxPanelMode::Standalone)
-        {
-            variationBtn_.setButtonText(variationSupported_ ? "VARIATION" : "VAR (N/A)");
-            variationBtn_.setAlpha(variationSupported_ ? 1.0f : 0.58f);
-        }
-        else if (variationSquareBtn_)
+        if (variationSquareBtn_)
         {
             variationSquareBtn_->setAlpha(variationSupported_ ? 1.0f : 0.58f);
             repaint(actionCardBounds_);
+        }
+    }
+
+    if (midiFlashFn_ && mode_ == RhythmboxPanelMode::Standalone)
+    {
+        const std::uint32_t midiMask = midiFlashFn_();
+        if (midiMask != 0u)
+        {
+            for (std::size_t v = 0; v < ke310::rhythmbox::kNumVoices; ++v)
+            {
+                if ((midiMask & (1u << static_cast<unsigned>(v))) != 0u && padButtons_[v])
+                {
+                    padButtons_[v]->triggerFlash();
+                }
+            }
         }
     }
 
@@ -1079,17 +1032,19 @@ void RhythmboxPanel::timerCallback()
         }
     }
 
+    if (rhythmStartBtn_)
+    {
+        rhythmStartBtn_->setActiveIndicator(telemetry_.lamp.isRunning);
+    }
+
     if (mode_ == RhythmboxPanelMode::Standalone)
     {
         repaint(headerBounds_);
         repaint(knobCardBounds_);
+        repaint(actionCardBounds_);
     }
     else
     {
-        if (rhythmStartBtn_)
-        {
-            rhythmStartBtn_->setActiveIndicator(telemetry_.lamp.isRunning);
-        }
         repaint(lampMultiCardBounds_);
         repaint(knobCardBounds_);
     }
@@ -1140,6 +1095,71 @@ void RhythmboxPanel::paint(juce::Graphics& g)
     }
 }
 
+void RhythmboxPanel::paintPatternMatrixCard(juce::Graphics& g) const
+{
+    g.setColour(rb_palette::cardBg);
+    g.fillRoundedRectangle(matrixCardBounds_.toFloat(), 6.0f);
+    g.setColour(rb_palette::cardBorder);
+    g.drawRoundedRectangle(matrixCardBounds_.toFloat().reduced(0.5f), 6.0f, 1.0f);
+
+    const auto wb = wellBounds_.toFloat();
+    g.setColour(juce::Colour(0xff0c0b0a));
+    g.fillRoundedRectangle(wb, 4.5f);
+    g.setColour(juce::Colour(0xff3b352f));
+    g.drawRoundedRectangle(wb, 4.5f, 1.0f);
+
+    const float lblFont = std::clamp(static_cast<float>(wellBounds_.getWidth()) * 0.022f, 8.2f, 10.2f);
+    g.setFont(juce::Font(juce::FontOptions(lblFont, juce::Font::bold)));
+    g.setColour(rb_palette::creamText);
+    for (std::size_t idx = 0; idx < ke310::rhythmbox::kNumPatterns; ++idx)
+    {
+        g.drawFittedText(kHardwareSilkscreenNames[idx], patternLabelBounds_[idx],
+                         juce::Justification::centred, 1, 0.72f);
+    }
+}
+
+void RhythmboxPanel::paintActionCard(juce::Graphics& g) const
+{
+    g.setColour(rb_palette::cardBg);
+    g.fillRoundedRectangle(actionCardBounds_.toFloat(), 6.0f);
+    g.setColour(rb_palette::cardBorder);
+    g.drawRoundedRectangle(actionCardBounds_.toFloat().reduced(0.5f), 6.0f, 1.0f);
+
+    drawSectionBracket(g, actionBracketBounds_, "RHYTHM", 9.5f);
+
+    const auto aw = actionWellBounds_.toFloat();
+    g.setColour(juce::Colour(0xff0c0b0a));
+    g.fillRoundedRectangle(aw, 4.5f);
+    g.setColour(juce::Colour(0xff3b352f));
+    g.drawRoundedRectangle(aw, 4.5f, 1.0f);
+
+    const char* actionNames[3] = {"BREAK", variationSupported_ ? "VARIATION" : "VAR (N/A)", "RHYTHM"};
+    g.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
+    for (std::size_t k = 0; k < 3; ++k)
+    {
+        const bool dimmed = (k == 1 && !variationSupported_);
+        g.setColour(dimmed ? rb_palette::mutedText.withAlpha(0.6f) : rb_palette::creamText);
+        g.drawFittedText(actionNames[k], actionLabelBounds_[k], juce::Justification::centred, 1, 0.70f);
+    }
+
+    if (!transportWellBounds_.isEmpty())
+    {
+        const auto tw = transportWellBounds_.toFloat();
+        g.setColour(juce::Colour(0xff0c0b0a));
+        g.fillRoundedRectangle(tw, 4.5f);
+        g.setColour(juce::Colour(0xff3b352f));
+        g.drawRoundedRectangle(tw, 4.5f, 1.0f);
+
+        const char* transportNames[2] = {"START", "STOP"};
+        g.setFont(juce::Font(juce::FontOptions(9.2f, juce::Font::bold)));
+        g.setColour(rb_palette::creamText);
+        for (std::size_t k = 0; k < 2; ++k)
+        {
+            g.drawFittedText(transportNames[k], transportLabelBounds_[k], juce::Justification::centred, 1, 0.72f);
+        }
+    }
+}
+
 void RhythmboxPanel::paintStandalone(juce::Graphics& g)
 {
     const auto full = getLocalBounds().toFloat();
@@ -1162,13 +1182,10 @@ void RhythmboxPanel::paintStandalone(juce::Graphics& g)
         g.drawRoundedRectangle(hb, 5.0f, 1.0f);
 
         // Title Badge on left
-        auto titleBox = headerBounds_.withWidth(std::min(210, headerBounds_.getWidth() / 3)).reduced(10, 3);
+        auto titleBox = headerBounds_.withWidth(std::min(176, headerBounds_.getWidth() / 4)).reduced(10, 4);
         g.setColour(rb_palette::creamText);
-        g.setFont(juce::Font(juce::FontOptions(14.5f, juce::Font::bold)));
-        g.drawFittedText("KE RHYTHMBOX", titleBox.removeFromTop(18), juce::Justification::centredLeft, 1);
-        g.setColour(rb_palette::mutedText);
-        g.setFont(juce::Font(juce::FontOptions(8.8f, juce::Font::bold)));
-        g.drawFittedText("ANALOG RHYTHM SYNTHESIZER", titleBox, juce::Justification::centredLeft, 1);
+        g.setFont(juce::Font(juce::FontOptions(15.0f, juce::Font::bold)));
+        g.drawFittedText("KE RHYTHMBOX", titleBox, juce::Justification::centredLeft, 1);
 
         drawTempoLamp(g, tempoLampBounds_);
 
@@ -1181,12 +1198,17 @@ void RhythmboxPanel::paintStandalone(juce::Graphics& g)
                                          : (isRun ? ("STEP " + juce::String(telemetry_.lamp.currentStep + 1).paddedLeft('0', 2) +
                                                      "/" + juce::String(telemetry_.lamp.totalSteps))
                                                   : "READY");
-        const int syncIdx = syncModeBox_.getSelectedId() - 1;
-        const juce::String syncTag = (syncIdx == 2) ? "HOST SYNC" : (syncIdx == 1 ? "HOST BPM" : "INT");
+        juce::String statusLine = bpmStr + "  |  " + stepStr;
+        if (!isStandaloneApp_)
+        {
+            const auto* syncP = apvts_.getRawParameterValue(ke310::rhythmbox_plugin::param_ids::rbSyncMode);
+            const int syncIdx = (syncP != nullptr) ? static_cast<int>(std::lround(syncP->load(std::memory_order_relaxed))) : 1;
+            const juce::String syncTag = (syncIdx == 2) ? "HOST SYNC" : (syncIdx == 1 ? "HOST BPM" : "INT");
+            statusLine += "  |  " + syncTag;
+        }
         g.setColour(isRun ? rb_palette::pinkRedHi : rb_palette::creamText);
         g.setFont(juce::Font(juce::FontOptions(11.5f, juce::Font::bold)));
-        g.drawFittedText(bpmStr + "  |  " + stepStr + "  |  " + syncTag,
-                         statusTextBounds_, juce::Justification::centredLeft, 1, 0.72f);
+        g.drawFittedText(statusLine, statusTextBounds_, juce::Justification::centredLeft, 1, 0.72f);
 
         // Stereo output bar meter
         const auto mb = meterBounds_.toFloat();
@@ -1201,37 +1223,16 @@ void RhythmboxPanel::paintStandalone(juce::Graphics& g)
         g.fillRoundedRectangle(fillBar, 2.0f);
     }
 
-    // Main Deck Cards: Left 2x8 Matrix + Right 3 Knobs
     auto drawCard = [&g](const juce::Rectangle<int>& rect)
     {
         g.setColour(rb_palette::cardBg);
-        g.fillRoundedRectangle(rect.toFloat(), 5.0f);
+        g.fillRoundedRectangle(rect.toFloat(), 6.0f);
         g.setColour(rb_palette::cardBorder);
-        g.drawRoundedRectangle(rect.toFloat(), 5.0f, 1.0f);
+        g.drawRoundedRectangle(rect.toFloat().reduced(0.5f), 6.0f, 1.0f);
     };
 
-    drawCard(matrixCardBounds_);
-
-    // Recessed dark hardware bezel well behind the 16 push-buttons
-    {
-        const auto wb = wellBounds_.toFloat();
-        g.setColour(juce::Colour(0xff0c0b0a));
-        g.fillRoundedRectangle(wb, 4.5f);
-        g.setColour(juce::Colour(0xff3b352f));
-        g.drawRoundedRectangle(wb, 4.5f, 1.0f);
-    }
-
-    // Staggered hardware silkscreen labels above Row 0 and below Row 1
-    {
-        const float lblFont = std::clamp(static_cast<float>(wellBounds_.getWidth()) * 0.022f, 8.2f, 10.2f);
-        g.setFont(juce::Font(juce::FontOptions(lblFont, juce::Font::bold)));
-        g.setColour(rb_palette::creamText);
-        for (std::size_t idx = 0; idx < ke310::rhythmbox::kNumPatterns; ++idx)
-        {
-            g.drawFittedText(kHardwareSilkscreenNames[idx], patternLabelBounds_[idx],
-                             juce::Justification::centred, 1, 0.72f);
-        }
-    }
+    // Main Deck Cards: Left 2x8 Matrix + Middle 3 Knobs + Right Action/Transport
+    paintPatternMatrixCard(g);
 
     drawCard(knobCardBounds_);
     drawSectionBracket(g, knobBracketBounds_, "TONE / LEVEL / TEMPO");
@@ -1244,7 +1245,6 @@ void RhythmboxPanel::paintStandalone(juce::Graphics& g)
         g.drawFittedText(knobNames[k], knobLabelBounds_[k], juce::Justification::centred, 1);
     }
 
-    // TONE scale captions: DRUM / CYM cleanly tucked at bottom of dial arc
     if (toneSubLabelBounds_.getWidth() > 24)
     {
         g.setFont(juce::Font(juce::FontOptions(8.2f, juce::Font::bold)));
@@ -1253,12 +1253,24 @@ void RhythmboxPanel::paintStandalone(juce::Graphics& g)
         g.drawText("CYM", toneSubLabelBounds_, juce::Justification::bottomRight, false);
     }
 
-    // Control & Sync Strip card
-    drawCard(controlBarBounds_);
+    if (!isStandaloneApp_)
+    {
+        const auto* syncP = apvts_.getRawParameterValue(ke310::rhythmbox_plugin::param_ids::rbSyncMode);
+        const int syncIdx = (syncP != nullptr) ? static_cast<int>(std::lround(syncP->load(std::memory_order_relaxed))) : 1;
+        if (syncIdx != 0)
+        {
+            const juce::String extLabel = (syncIdx == 2) ? "HOST SYNC" : "HOST TEMPO";
+            g.setColour(telemetry_.lamp.usingHostBpm ? rb_palette::amberLed : rb_palette::mutedText);
+            g.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
+            g.drawFittedText(extLabel, tempoModeLabelBounds_, juce::Justification::centred, 1, 0.72f);
+        }
+    }
+
+    paintActionCard(g);
 
     // Bottom Voice Audition Pads Bay
     drawCard(padBayBounds_);
-    drawSectionBracket(g, padBracketBounds_, "ANALOG VOICE TRIGGERS (GM DRUM MAP)");
+    drawSectionBracket(g, padBracketBounds_, "GM DRUM MAP");
 }
 
 void RhythmboxPanel::paintOrganEmbedded(juce::Graphics& g)
@@ -1272,23 +1284,7 @@ void RhythmboxPanel::paintOrganEmbedded(juce::Graphics& g)
     };
 
     // Section 1: 2x8 Rhythm Pattern Matrix
-    drawCard(matrixCardBounds_);
-    {
-        const auto wb = wellBounds_.toFloat();
-        g.setColour(juce::Colour(0xff0c0b0a));
-        g.fillRoundedRectangle(wb, 4.5f);
-        g.setColour(juce::Colour(0xff3b352f));
-        g.drawRoundedRectangle(wb, 4.5f, 1.0f);
-
-        const float lblFont = std::clamp(static_cast<float>(wellBounds_.getWidth()) * 0.022f, 8.2f, 10.2f);
-        g.setFont(juce::Font(juce::FontOptions(lblFont, juce::Font::bold)));
-        g.setColour(rb_palette::creamText);
-        for (std::size_t idx = 0; idx < ke310::rhythmbox::kNumPatterns; ++idx)
-        {
-            g.drawFittedText(kHardwareSilkscreenNames[idx], patternLabelBounds_[idx],
-                             juce::Justification::centred, 1, 0.72f);
-        }
-    }
+    paintPatternMatrixCard(g);
 
     // Section 2: Vertical {Red Tempo Lamp, Multi-Pattern} column (no BPM/Step text per spec)
     drawCard(lampMultiCardBounds_);
@@ -1330,42 +1326,165 @@ void RhythmboxPanel::paintOrganEmbedded(juce::Graphics& g)
     }
 
     // Section 4: Square Action Buttons (BREAK White, VARIATION Black, RHYTHM Red) + START / STOP transport buttons
-    drawCard(actionCardBounds_);
+    paintActionCard(g);
+}
+
+int RhythmboxPanel::layoutPatternMatrixCard(juce::Rectangle<int> cardBounds)
+{
+    matrixCardBounds_ = cardBounds;
+    auto mInner = matrixCardBounds_.reduced(8, 5);
+    const int topBandH = juce::jlimit(26, 30, mInner.getHeight() / 6);
+    const int botBandH = topBandH;
+    const int availH = std::max(60, mInner.getHeight() - topBandH - botBandH);
+    const int mAvailW = std::max(180, mInner.getWidth() - 10);
+
+    const int cols = 8;
+    const int rows = 2;
+    const int gapX = 2;
+    const float maxSqW = static_cast<float>(mAvailW - gapX * (cols - 1)) / static_cast<float>(cols);
+    const float maxSqH = static_cast<float>(availH - 6) / 2.60f;
+    const int sq = std::clamp(static_cast<int>(std::floor(std::min(maxSqW, maxSqH))), 22, 54);
+    const int extrude = static_cast<int>(std::round(static_cast<float>(sq) * 0.42f));
+    const int btnH = sq + extrude;
+    const int rowPitch = static_cast<int>(std::round(static_cast<float>(sq) * 1.16f));
+
+    const int totalButtonsH = rowPitch + btnH;
+    const int row0Y = mInner.getY() + topBandH + std::max(0, (availH - totalButtonsH) / 2);
+    const int baseOffsetY = static_cast<int>(std::round(static_cast<float>(extrude) * 0.90f));
+
+    const int wellW = sq * cols + gapX * (cols - 1) + 8;
+    const int wellX = mInner.getCentreX() - wellW / 2;
+    const int wellTop = row0Y + baseOffsetY;
+    const int wellBot = row0Y + rowPitch + sq + baseOffsetY + 3;
+    wellBounds_ = {wellX, wellTop, wellW, wellBot - wellTop};
+
+    const int cardLeft = matrixCardBounds_.getX() + 3;
+    const int cardRight = matrixCardBounds_.getRight() - 3;
+    const int lblW = sq + 24;
+    const int lblH = 13;
+
+    for (int r = 0; r < rows; ++r)
     {
-        drawSectionBracket(g, actionBracketBounds_, "RHYTHM", 9.5f);
-
-        const auto aw = actionWellBounds_.toFloat();
-        g.setColour(juce::Colour(0xff0c0b0a));
-        g.fillRoundedRectangle(aw, 4.5f);
-        g.setColour(juce::Colour(0xff3b352f));
-        g.drawRoundedRectangle(aw, 4.5f, 1.0f);
-
-        const char* actionNames[3] = {"BREAK", variationSupported_ ? "VARIATION" : "VAR (N/A)", "RHYTHM"};
-        g.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
-        for (std::size_t k = 0; k < 3; ++k)
+        for (int c = 0; c < cols; ++c)
         {
-            const bool dimmed = (k == 1 && !variationSupported_);
-            g.setColour(dimmed ? rb_palette::mutedText.withAlpha(0.6f) : rb_palette::creamText);
-            g.drawFittedText(actionNames[k], actionLabelBounds_[k], juce::Justification::centred, 1, 0.70f);
-        }
+            const std::size_t idx = static_cast<std::size_t>(r * cols + c);
+            const int bx = wellX + 4 + c * (sq + gapX);
+            const int by = row0Y + r * rowPitch;
+            patternButtons_[idx]->setBounds(bx, by, sq, btnH);
 
-        if (!transportWellBounds_.isEmpty())
-        {
-            const auto tw = transportWellBounds_.toFloat();
-            g.setColour(juce::Colour(0xff0c0b0a));
-            g.fillRoundedRectangle(tw, 4.5f);
-            g.setColour(juce::Colour(0xff3b352f));
-            g.drawRoundedRectangle(tw, 4.5f, 1.0f);
-
-            const char* transportNames[2] = {"START", "STOP"};
-            g.setFont(juce::Font(juce::FontOptions(9.2f, juce::Font::bold)));
-            g.setColour(rb_palette::creamText);
-            for (std::size_t k = 0; k < 2; ++k)
+            const int cx = bx + sq / 2;
+            const int lx = std::clamp(cx - lblW / 2, cardLeft, cardRight - lblW);
+            const bool isOddCol = (c % 2) == 1;
+            int ly = 0;
+            if (r == 0)
             {
-                g.drawFittedText(transportNames[k], transportLabelBounds_[k], juce::Justification::centred, 1, 0.72f);
+                ly = isOddCol ? (row0Y - 26) : (row0Y - 14);
             }
+            else
+            {
+                ly = isOddCol ? (wellBounds_.getBottom() + 2) : (wellBounds_.getBottom() + 14);
+            }
+            patternLabelBounds_[idx] = {lx, ly, lblW, lblH};
         }
     }
+    return sq;
+}
+
+void RhythmboxPanel::layoutActionCard(juce::Rectangle<int> cardBounds, int matrixSq)
+{
+    actionCardBounds_ = cardBounds;
+    auto aInner = actionCardBounds_.reduced(8, 6);
+    const int gapX = 6;
+    const int maxActSqW = (aInner.getWidth() - 10 - gapX * 2) / 3;
+    const int maxActSqH = static_cast<int>(std::floor(static_cast<float>(std::max(60, aInner.getHeight() - 70)) / 2.25f));
+    const int sq = std::clamp(std::min({matrixSq, maxActSqW, maxActSqH}), 26, 44);
+    const int extrude = static_cast<int>(std::round(static_cast<float>(sq) * 0.42f));
+    const int btnH = sq + extrude;
+    const int baseOffsetY = static_cast<int>(std::round(static_cast<float>(extrude) * 0.90f));
+
+    const int bracketH = 15;
+    const int bracketGap = 3;
+    const int lblGap = 4;
+    const int lblH = 13;
+    const int rowGap = 8;
+
+    const int ssSide = std::clamp(sq - 6, 26, 38);
+    const int ssPad = 4;
+    const int ssGap = 6;
+    const int trLblGap = 3;
+    const int trLblH = 13;
+    const int transportBezelW = ssSide * 2 + ssGap + ssPad * 2;
+    const int transportBezelH = ssSide + ssPad * 2;
+
+    const int topBlockH = bracketH + bracketGap + sq + baseOffsetY + 3 + lblGap + lblH;
+    const int botBlockH = transportBezelH + trLblGap + trLblH;
+    const int totalActH = topBlockH + rowGap + botBlockH;
+    const int topY = aInner.getY() + std::max(0, (aInner.getHeight() - totalActH) / 2);
+
+    const int rowY = topY + bracketH + bracketGap;
+    const int wellW = sq * 3 + gapX * 2 + 10;
+    const int wellX = aInner.getCentreX() - wellW / 2;
+    const int wellTop = rowY + baseOffsetY;
+    const int wellBot = rowY + sq + baseOffsetY + 3;
+    actionWellBounds_ = {wellX, wellTop, wellW, wellBot - wellTop};
+
+    PatternPushButton* actBtns[3] = {breakBtn_.get(), variationSquareBtn_.get(), rhythmBtn_.get()};
+    const int cardLeft = actionCardBounds_.getX() + 3;
+    const int cardRight = actionCardBounds_.getRight() - 3;
+    const int lblW = sq + 12;
+
+    int varX = wellX + 5;
+    int rhyRight = wellX + wellW - 5;
+    for (int k = 0; k < 3; ++k)
+    {
+        const int bx = wellX + 5 + k * (sq + gapX);
+        if (actBtns[k] != nullptr)
+        {
+            actBtns[k]->setBounds(bx, rowY, sq, btnH);
+        }
+        if (k == 1)
+        {
+            varX = bx;
+        }
+        else if (k == 2)
+        {
+            rhyRight = bx + sq;
+        }
+        const int lx = std::clamp(bx + sq / 2 - lblW / 2, cardLeft, cardRight - lblW);
+        actionLabelBounds_[static_cast<std::size_t>(k)] = {lx, actionWellBounds_.getBottom() + lblGap, lblW, lblH};
+    }
+
+    actionBracketBounds_ = {varX - 4, topY, std::max(24, (rhyRight - varX) + 8), bracketH};
+
+    const int trWellX = aInner.getCentreX() - transportBezelW / 2;
+    const int trWellY = actionWellBounds_.getBottom() + lblGap + lblH + rowGap;
+    transportWellBounds_ = {trWellX, trWellY, transportBezelW, transportBezelH};
+
+    const int startX = trWellX + ssPad;
+    const int stopX = startX + ssSide + ssGap;
+    const int btnY = trWellY + ssPad;
+    if (rhythmStartBtn_)
+    {
+        rhythmStartBtn_->setBounds(startX, btnY, ssSide, ssSide);
+    }
+    if (rhythmStopBtn_)
+    {
+        rhythmStopBtn_->setBounds(stopX, btnY, ssSide, ssSide);
+    }
+
+    const int trLblW = ssSide + 12;
+    transportLabelBounds_[0] = {
+        std::clamp(startX + ssSide / 2 - trLblW / 2, cardLeft, cardRight - trLblW),
+        transportWellBounds_.getBottom() + trLblGap,
+        trLblW,
+        trLblH
+    };
+    transportLabelBounds_[1] = {
+        std::clamp(stopX + ssSide / 2 - trLblW / 2, cardLeft, cardRight - trLblW),
+        transportWellBounds_.getBottom() + trLblGap,
+        trLblW,
+        trLblH
+    };
 }
 
 void RhythmboxPanel::resized()
@@ -1383,74 +1502,16 @@ void RhythmboxPanel::resized()
         const int knobW = std::max(210, availW - matrixW - lampW - actionW);
 
         auto row = deckBounds_;
-        matrixCardBounds_ = row.removeFromLeft(matrixW);
+        const auto mBounds = row.removeFromLeft(matrixW);
         row.removeFromLeft(gap);
         lampMultiCardBounds_ = row.removeFromLeft(lampW);
         row.removeFromLeft(gap);
         knobCardBounds_ = row.removeFromLeft(knobW);
         row.removeFromLeft(gap);
-        actionCardBounds_ = row;
+        const auto aBounds = row;
 
-        // 1. 2x8 Rhythm Pattern Matrix (faceplate-aligned bezel cutout)
-        int matrixSq = 46;
-        {
-            auto mInner = matrixCardBounds_.reduced(8, 5);
-            const int topBandH = juce::jlimit(26, 30, mInner.getHeight() / 6);
-            const int botBandH = topBandH;
-            const int availH = std::max(60, mInner.getHeight() - topBandH - botBandH);
-            const int mAvailW = std::max(180, mInner.getWidth() - 10);
-
-            const int cols = 8;
-            const int rows = 2;
-            const int gapX = 2;
-            const float maxSqW = static_cast<float>(mAvailW - gapX * (cols - 1)) / static_cast<float>(cols);
-            const float maxSqH = static_cast<float>(availH - 6) / 2.60f;
-            const int sq = std::clamp(static_cast<int>(std::floor(std::min(maxSqW, maxSqH))), 22, 54);
-            matrixSq = sq;
-            const int extrude = static_cast<int>(std::round(static_cast<float>(sq) * 0.42f));
-            const int btnH = sq + extrude;
-            const int rowPitch = static_cast<int>(std::round(static_cast<float>(sq) * 1.16f));
-
-            const int totalButtonsH = rowPitch + btnH;
-            const int row0Y = mInner.getY() + topBandH + std::max(0, (availH - totalButtonsH) / 2);
-            const int baseOffsetY = static_cast<int>(std::round(static_cast<float>(extrude) * 0.90f));
-
-            const int wellW = sq * cols + gapX * (cols - 1) + 8;
-            const int wellX = mInner.getCentreX() - wellW / 2;
-            const int wellTop = row0Y + baseOffsetY;
-            const int wellBot = row0Y + rowPitch + sq + baseOffsetY + 3;
-            wellBounds_ = {wellX, wellTop, wellW, wellBot - wellTop};
-
-            const int cardLeft = matrixCardBounds_.getX() + 3;
-            const int cardRight = matrixCardBounds_.getRight() - 3;
-            const int lblW = sq + 24;
-            const int lblH = 13;
-
-            for (int r = 0; r < rows; ++r)
-            {
-                for (int c = 0; c < cols; ++c)
-                {
-                    const std::size_t idx = static_cast<std::size_t>(r * cols + c);
-                    const int bx = wellX + 4 + c * (sq + gapX);
-                    const int by = row0Y + r * rowPitch;
-                    patternButtons_[idx]->setBounds(bx, by, sq, btnH);
-
-                    const int cx = bx + sq / 2;
-                    const int lx = std::clamp(cx - lblW / 2, cardLeft, cardRight - lblW);
-                    const bool isOddCol = (c % 2) == 1;
-                    int ly = 0;
-                    if (r == 0)
-                    {
-                        ly = isOddCol ? (row0Y - 26) : (row0Y - 14);
-                    }
-                    else
-                    {
-                        ly = isOddCol ? (wellBounds_.getBottom() + 2) : (wellBounds_.getBottom() + 14);
-                    }
-                    patternLabelBounds_[idx] = {lx, ly, lblW, lblH};
-                }
-            }
-        }
+        // 1. 2x8 Rhythm Pattern Matrix
+        const int matrixSq = layoutPatternMatrixCard(mBounds);
 
         // 2. Vertical {Red Tempo Lamp, Multi-Pattern} column
         {
@@ -1495,115 +1556,22 @@ void RhythmboxPanel::resized()
             }
         }
 
-        // 4. 3 Square Action Buttons: BREAK (White), VARIATION (Black), RHYTHM (Red) + START / STOP transport buttons
-        {
-            auto aInner = actionCardBounds_.reduced(8, 6);
-            const int gapX = 6;
-            const int maxActSqW = (aInner.getWidth() - 10 - gapX * 2) / 3;
-            const int maxActSqH = static_cast<int>(std::floor(static_cast<float>(std::max(60, aInner.getHeight() - 70)) / 2.25f));
-            const int sq = std::clamp(std::min({matrixSq, maxActSqW, maxActSqH}), 26, 44);
-            const int extrude = static_cast<int>(std::round(static_cast<float>(sq) * 0.42f));
-            const int btnH = sq + extrude;
-            const int baseOffsetY = static_cast<int>(std::round(static_cast<float>(extrude) * 0.90f));
-
-            const int bracketH = 15;
-            const int bracketGap = 3;
-            const int lblGap = 4;
-            const int lblH = 13;
-            const int rowGap = 8;
-
-            const int ssSide = std::clamp(sq - 6, 26, 38);
-            const int ssPad = 4;
-            const int ssGap = 6;
-            const int trLblGap = 3;
-            const int trLblH = 13;
-            const int transportBezelW = ssSide * 2 + ssGap + ssPad * 2;
-            const int transportBezelH = ssSide + ssPad * 2;
-
-            const int topBlockH = bracketH + bracketGap + sq + baseOffsetY + 3 + lblGap + lblH;
-            const int botBlockH = transportBezelH + trLblGap + trLblH;
-            const int totalActH = topBlockH + rowGap + botBlockH;
-            const int topY = aInner.getY() + std::max(0, (aInner.getHeight() - totalActH) / 2);
-
-            const int rowY = topY + bracketH + bracketGap;
-            const int wellW = sq * 3 + gapX * 2 + 10;
-            const int wellX = aInner.getCentreX() - wellW / 2;
-            const int wellTop = rowY + baseOffsetY;
-            const int wellBot = rowY + sq + baseOffsetY + 3;
-            actionWellBounds_ = {wellX, wellTop, wellW, wellBot - wellTop};
-
-            PatternPushButton* actBtns[3] = {breakBtn_.get(), variationSquareBtn_.get(), rhythmBtn_.get()};
-            const int cardLeft = actionCardBounds_.getX() + 3;
-            const int cardRight = actionCardBounds_.getRight() - 3;
-            const int lblW = sq + 12;
-
-            int varX = wellX + 5;
-            int rhyRight = wellX + wellW - 5;
-            for (int k = 0; k < 3; ++k)
-            {
-                const int bx = wellX + 5 + k * (sq + gapX);
-                if (actBtns[k] != nullptr)
-                {
-                    actBtns[k]->setBounds(bx, rowY, sq, btnH);
-                }
-                if (k == 1)
-                {
-                    varX = bx;
-                }
-                else if (k == 2)
-                {
-                    rhyRight = bx + sq;
-                }
-                const int lx = std::clamp(bx + sq / 2 - lblW / 2, cardLeft, cardRight - lblW);
-                actionLabelBounds_[static_cast<std::size_t>(k)] = {lx, actionWellBounds_.getBottom() + lblGap, lblW, lblH};
-            }
-
-            actionBracketBounds_ = {varX - 4, topY, std::max(24, (rhyRight - varX) + 8), bracketH};
-
-            const int trWellX = aInner.getCentreX() - transportBezelW / 2;
-            const int trWellY = actionWellBounds_.getBottom() + lblGap + lblH + rowGap;
-            transportWellBounds_ = {trWellX, trWellY, transportBezelW, transportBezelH};
-
-            const int startX = trWellX + ssPad;
-            const int stopX = startX + ssSide + ssGap;
-            const int btnY = trWellY + ssPad;
-            if (rhythmStartBtn_)
-            {
-                rhythmStartBtn_->setBounds(startX, btnY, ssSide, ssSide);
-            }
-            if (rhythmStopBtn_)
-            {
-                rhythmStopBtn_->setBounds(stopX, btnY, ssSide, ssSide);
-            }
-
-            const int trLblW = ssSide + 12;
-            transportLabelBounds_[0] = {
-                std::clamp(startX + ssSide / 2 - trLblW / 2, cardLeft, cardRight - trLblW),
-                transportWellBounds_.getBottom() + trLblGap,
-                trLblW,
-                trLblH
-            };
-            transportLabelBounds_[1] = {
-                std::clamp(stopX + ssSide / 2 - trLblW / 2, cardLeft, cardRight - trLblW),
-                transportWellBounds_.getBottom() + trLblGap,
-                trLblW,
-                trLblH
-            };
-        }
+        // 4. 3 Square Action Buttons + START / STOP transport buttons
+        layoutActionCard(aBounds, matrixSq);
         return;
     }
 
     auto area = getLocalBounds().reduced(8, 6);
 
     // 1. Header strip
-    const int headerH = juce::jlimit(36, 46, area.getHeight() / 9);
+    const int headerH = juce::jlimit(36, 44, area.getHeight() / 9);
     headerBounds_ = area.removeFromTop(headerH);
     {
         auto hRow = headerBounds_.reduced(6, 5);
-        hRow.removeFromLeft(std::min(205, hRow.getWidth() / 3));
-        startStopBtn_.setBounds(hRow.removeFromRight(std::min(126, hRow.getWidth() / 4)));
+        hRow.removeFromLeft(std::min(168, hRow.getWidth() / 4));
+        meterBounds_ = hRow.removeFromRight(std::min(104, hRow.getWidth() / 5)).reduced(0, 6);
         hRow.removeFromRight(8);
-        meterBounds_ = hRow.removeFromRight(std::min(104, hRow.getWidth() / 4)).reduced(0, 7);
+        multiPatternBtn_.setBounds(hRow.removeFromRight(std::min(116, hRow.getWidth() / 4)));
         hRow.removeFromRight(8);
         tempoLampBounds_ = hRow.removeFromLeft(26);
         hRow.removeFromLeft(10);
@@ -1612,93 +1580,41 @@ void RhythmboxPanel::resized()
 
     area.removeFromTop(6);
 
-    // Reserve bottom strips
-    const int padBayH = juce::jlimit(66, 88, area.getHeight() / 5);
+    // Reserve bottom GM DRUM MAP audition bay
+    const int padBayH = juce::jlimit(66, 86, area.getHeight() / 5);
     padBayBounds_ = area.removeFromBottom(padBayH);
     area.removeFromBottom(6);
 
-    const int ctrlBarH = juce::jlimit(38, 48, area.getHeight() / 7);
-    controlBarBounds_ = area.removeFromBottom(ctrlBarH);
-    area.removeFromBottom(6);
-
-    // 2. Main Deck: 2x8 Matrix (Left ~66%) + 3 Large Knobs (Right ~34%)
+    // 2. Main Deck: 2x8 Matrix (~46%) + 3 Large Knobs (~31%) + Action/Transport (~23%)
     deckBounds_ = area;
-    const int knobCardW = juce::jlimit(210, 265, (deckBounds_.getWidth() * 34) / 100);
-    knobCardBounds_ = deckBounds_.removeFromRight(knobCardW);
-    deckBounds_.removeFromRight(6);
-    matrixCardBounds_ = deckBounds_;
+    const int gap = 6;
+    const int availW = std::max(480, deckBounds_.getWidth() - gap * 2);
+    const int matrixW = std::clamp((availW * 46) / 100, 340, 520);
+    const int actionW = std::clamp((availW * 23) / 100, 176, 250);
+    const int knobW = std::max(185, availW - matrixW - actionW);
 
-    // Layout 2x8 square push-buttons inside dark recessed well + staggered silkscreen labels
-    {
-        auto mInner = matrixCardBounds_.reduced(8, 6);
-        const int topBandH = juce::jlimit(26, 32, mInner.getHeight() / 6);
-        const int botBandH = topBandH;
-        const int availH = std::max(60, mInner.getHeight() - topBandH - botBandH);
-        const int availW = std::max(180, mInner.getWidth() - 10);
+    auto row = deckBounds_;
+    const auto mBounds = row.removeFromLeft(matrixW);
+    row.removeFromLeft(gap);
+    knobCardBounds_ = row.removeFromLeft(knobW);
+    row.removeFromLeft(gap);
+    const auto aBounds = row;
 
-        const int cols = 8;
-        const int rows = 2;
-        const int gapX = 2;
-        const float maxSqW = static_cast<float>(availW - gapX * (cols - 1)) / static_cast<float>(cols);
-        const float maxSqH = static_cast<float>(availH - 6) / 2.60f;
-        const int sq = std::clamp(static_cast<int>(std::floor(std::min(maxSqW, maxSqH))), 22, 56);
-        const int extrude = static_cast<int>(std::round(static_cast<float>(sq) * 0.42f));
-        const int btnH = sq + extrude;
-        const int rowPitch = static_cast<int>(std::round(static_cast<float>(sq) * 1.16f));
+    const int matrixSq = layoutPatternMatrixCard(mBounds);
 
-        const int totalButtonsH = rowPitch + btnH;
-        const int row0Y = mInner.getY() + topBandH + std::max(0, (availH - totalButtonsH) / 2);
-        const int baseOffsetY = static_cast<int>(std::round(static_cast<float>(extrude) * 0.90f));
-
-        const int wellW = sq * cols + gapX * (cols - 1) + 8;
-        const int wellX = mInner.getCentreX() - wellW / 2;
-        const int wellTop = row0Y + baseOffsetY;
-        const int wellBot = row0Y + rowPitch + sq + baseOffsetY + 3;
-        wellBounds_ = {wellX, wellTop, wellW, wellBot - wellTop};
-
-        const int cardLeft = matrixCardBounds_.getX() + 3;
-        const int cardRight = matrixCardBounds_.getRight() - 3;
-        const int lblW = sq + 24;
-        const int lblH = 13;
-
-        for (int r = 0; r < rows; ++r)
-        {
-            for (int c = 0; c < cols; ++c)
-            {
-                const std::size_t idx = static_cast<std::size_t>(r * cols + c);
-                const int bx = wellX + 4 + c * (sq + gapX);
-                const int by = row0Y + r * rowPitch;
-                patternButtons_[idx]->setBounds(bx, by, sq, btnH);
-
-                const int cx = bx + sq / 2;
-                const int lx = std::clamp(cx - lblW / 2, cardLeft, cardRight - lblW);
-                const bool isOddCol = (c % 2) == 1;
-                int ly = 0;
-                if (r == 0)
-                {
-                    ly = isOddCol ? (row0Y - 26) : (row0Y - 14);
-                }
-                else
-                {
-                    ly = isOddCol ? (wellBounds_.getBottom() + 2) : (wellBounds_.getBottom() + 14);
-                }
-                patternLabelBounds_[idx] = {lx, ly, lblW, lblH};
-            }
-        }
-    }
-
-    // Layout 3 Large Knobs: TONE, VOLUME, TEMPO vertically centered around circular dial
+    // Layout 3 Large Knobs: TONE, VOLUME, TEMPO
     {
         auto kInner = knobCardBounds_.reduced(8, 5);
         knobBracketBounds_ = kInner.removeFromTop(18);
         kInner.removeFromTop(4);
 
         const int colW = kInner.getWidth() / 3;
-        const int textBoxH = 18;
-        const int labelH = 16;
+        const int textBoxH = 17;
+        const int labelH = 15;
         const int labelGap = 4;
-        const int dialSz = std::max(44, std::min(colW - 6, kInner.getHeight() - labelH - labelGap - textBoxH - 4));
-        const int totalBlockH = labelH + labelGap + dialSz + textBoxH;
+        const int modeH = 13;
+        const int dialSz = std::max(44, std::min(colW - 6, kInner.getHeight() - labelH - labelGap - textBoxH - modeH - 4));
+        const int totalBlockH = labelH + labelGap + dialSz + textBoxH + modeH;
         const int blockY = kInner.getY() + std::max(0, (kInner.getHeight() - totalBlockH) / 2);
 
         juce::Slider* knobs[3] = {&toneSlider_, &volumeSlider_, &bpmSlider_};
@@ -1713,46 +1629,31 @@ void RhythmboxPanel::resized()
             {
                 toneSubLabelBounds_ = {colX + 2, sliderY + dialSz - 12, std::max(10, cellW - 4), 12};
             }
+            if (k == 2)
+            {
+                tempoModeLabelBounds_ = {colX - 4, sliderY + dialSz + textBoxH + 1, cellW + 8, modeH};
+            }
         }
     }
 
-    // 3. Control & Sync Strip (single clean row with generous ComboBox widths)
-    {
-        auto cInner = controlBarBounds_.reduced(8, 6);
-        const int h = cInner.getHeight();
-        variationBtn_.setBounds(cInner.removeFromLeft(std::min(96, cInner.getWidth() / 5)));
-        cInner.removeFromLeft(6);
-        multiPatternBtn_.setBounds(cInner.removeFromLeft(std::min(154, cInner.getWidth() / 3)));
-        cInner.removeFromLeft(6);
+    layoutActionCard(aBounds, matrixSq);
 
-        syncLbl_.setBounds(cInner.removeFromLeft(34).withHeight(h));
-        syncModeBox_.setBounds(cInner.removeFromLeft(std::min(98, cInner.getWidth() / 3)).withHeight(h));
-        cInner.removeFromLeft(6);
-
-        midiChLbl_.setBounds(cInner.removeFromLeft(32).withHeight(h));
-        midiChBox_.setBounds(cInner.removeFromLeft(std::min(74, cInner.getWidth() / 3)).withHeight(h));
-        cInner.removeFromLeft(6);
-
-        driftLbl_.setBounds(cInner.removeFromLeft(36).withHeight(h));
-        driftSlider_.setBounds(cInner.withHeight(h));
-    }
-
-    // 4. Bottom 11 Voice Audition Pads
+    // 3. Bottom 11 Voice Audition Pads (GM DRUM MAP)
     {
         auto pInner = padBayBounds_.reduced(7, 4);
         padBracketBounds_ = pInner.removeFromTop(16);
         pInner.removeFromTop(3);
 
         const int count = static_cast<int>(ke310::rhythmbox::kNumVoices);
-        const int gap = 4;
-        const int padW = std::max(24, (pInner.getWidth() - gap * (count - 1)) / count);
-        const int totalW = padW * count + gap * (count - 1);
+        const int padGap = 4;
+        const int padW = std::max(24, (pInner.getWidth() - padGap * (count - 1)) / count);
+        const int totalW = padW * count + padGap * (count - 1);
         const int xOff = pInner.getX() + (pInner.getWidth() - totalW) / 2;
 
         for (int v = 0; v < count; ++v)
         {
             padButtons_[static_cast<std::size_t>(v)]->setBounds(
-                xOff + v * (padW + gap), pInner.getY(), padW, pInner.getHeight());
+                xOff + v * (padW + padGap), pInner.getY(), padW, pInner.getHeight());
         }
     }
 }

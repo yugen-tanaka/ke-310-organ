@@ -170,21 +170,24 @@ public:
     using AuditionCallback = std::function<void(ke310::rhythmbox::VoiceId, float)>;
     using TelemetryCallback = std::function<ke310::rhythmbox::RhythmboxTelemetry()>;
     using HoldCallback = std::function<void(bool held)>;
+    using MidiFlashCallback = std::function<std::uint32_t()>;
 
     RhythmboxPanel(juce::AudioProcessorValueTreeState& apvts,
                    AuditionCallback onAuditionVoice,
                    TelemetryCallback getTelemetry,
                    RhythmboxPanelMode mode = RhythmboxPanelMode::Standalone,
                    HoldCallback onStartHeld = {},
-                   HoldCallback onStopHeld = {});
+                   HoldCallback onStopHeld = {},
+                   MidiFlashCallback consumeMidiFlash = {},
+                   bool isStandaloneApp = false);
     ~RhythmboxPanel() override;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void setStandaloneAppMode(bool standalone) noexcept;
 
     // Accessors helpful for automated GUI tests
     RhythmboxPanelMode mode() const noexcept { return mode_; }
-    juce::ToggleButton& startStopButton() noexcept { return startStopBtn_; }
     juce::ToggleButton& multiPatternButton() noexcept { return multiPatternBtn_; }
     juce::ToggleButton& patternButton(std::size_t index) noexcept { return *patternButtons_[index]; }
     juce::TextButton& auditionPad(std::size_t index) noexcept { return *padButtons_[index]; }
@@ -199,6 +202,10 @@ private:
     void timerCallback() override;
     void paintStandalone(juce::Graphics& g);
     void paintOrganEmbedded(juce::Graphics& g);
+    void paintPatternMatrixCard(juce::Graphics& g) const;
+    void paintActionCard(juce::Graphics& g) const;
+    int layoutPatternMatrixCard(juce::Rectangle<int> cardBounds);
+    void layoutActionCard(juce::Rectangle<int> cardBounds, int matrixSq);
     void drawTempoLamp(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void handlePatternButtonClick(std::size_t clickedIndex);
     void handleMultiPatternToggle();
@@ -211,15 +218,14 @@ private:
     RhythmboxPanelMode mode_ = RhythmboxPanelMode::Standalone;
     HoldCallback startHoldFn_;
     HoldCallback stopHoldFn_;
+    MidiFlashCallback midiFlashFn_;
+    bool isStandaloneApp_ = false;
     RhythmboxLookAndFeel lookAndFeel_;
-
-    // Top bar controls (Standalone)
-    juce::ToggleButton startStopBtn_{"START / STOP"};
 
     // Left 2x8 rhythm matrix
     std::array<std::unique_ptr<PatternPushButton>, ke310::rhythmbox::kNumPatterns> patternButtons_;
 
-    // 3 Square action buttons (OrganEmbedded: BREAK, VARIATION, RHYTHM) + START / STOP transport buttons
+    // 3 Square action buttons (BREAK, VARIATION, RHYTHM) + START / STOP transport buttons
     std::unique_ptr<PatternPushButton> breakBtn_;
     std::unique_ptr<PatternPushButton> variationSquareBtn_;
     std::unique_ptr<PatternPushButton> rhythmBtn_;
@@ -231,15 +237,8 @@ private:
     juce::Slider volumeSlider_{juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox};
     juce::Slider bpmSlider_{juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::TextBoxBelow};
 
-    // Control & Sync strip
-    juce::ToggleButton variationBtn_{"VARIATION"};
-    juce::ToggleButton multiPatternBtn_{"Multi-Pattern (Wired-OR)"};
-    juce::Label syncLbl_{{}, "SYNC"};
-    juce::ComboBox syncModeBox_;
-    juce::Label midiChLbl_{{}, "MIDI CH"};
-    juce::ComboBox midiChBox_;
-    juce::Label driftLbl_{{}, "DRIFT"};
-    juce::Slider driftSlider_{juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight};
+    // Multi-Pattern toggle
+    juce::ToggleButton multiPatternBtn_{"Multi-Pattern"};
 
     // Bottom 11 GM drum audition pads (Standalone)
     std::array<std::unique_ptr<AuditionPadButton>, ke310::rhythmbox::kNumVoices> padButtons_;
@@ -266,7 +265,6 @@ private:
     std::array<juce::Rectangle<int>, 3> actionLabelBounds_{};
     juce::Rectangle<int> transportWellBounds_;
     std::array<juce::Rectangle<int>, 2> transportLabelBounds_{};
-    juce::Rectangle<int> controlBarBounds_;
     juce::Rectangle<int> padBayBounds_;
     juce::Rectangle<int> padBracketBounds_;
 

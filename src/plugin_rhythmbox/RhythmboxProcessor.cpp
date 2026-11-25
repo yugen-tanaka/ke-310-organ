@@ -23,12 +23,43 @@ void RhythmboxAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlo
     const std::size_t cap = static_cast<std::size_t>(std::max(512, samplesPerBlock));
     monoScratch_.assign(cap, 0.0);
 
+    pendingUiVoices_.store(0u, std::memory_order_release);
+    uiRhythmStartHeld_.store(false, std::memory_order_release);
+    uiRhythmStopHeld_.store(false, std::memory_order_release);
+    midiFlashVoices_.store(0u, std::memory_order_release);
+
+    prevUiStartHeld_ = false;
+    prevUiStopHeld_ = false;
+    rhythmLatched_ = false;
+    prevTriggerHeld_ = false;
+    prevHostPlaying_ = false;
+    stopCcHeld_ = false;
+    heldTriggerNotes_.fill(0u);
+    heldTriggerNoteCount_ = 0;
+
+    auto rbState = rawParams_.readState();
+    prevRhythmArmed_ = rbState.enabled;
+    prevRhythmBreak_ = rawParams_.readBreakEnabled();
+    prevClockMode_ = rbState.clockMode;
+    rbState.enabled = false;
+
     engine_.prepare(sampleRate_);
-    engine_.applyState(rawParams_.readState());
+    engine_.applyState(rbState);
 }
 
 void RhythmboxAudioProcessor::releaseResources()
 {
+    uiRhythmStartHeld_.store(false, std::memory_order_release);
+    uiRhythmStopHeld_.store(false, std::memory_order_release);
+    prevUiStartHeld_ = false;
+    prevUiStopHeld_ = false;
+    rhythmLatched_ = false;
+    prevTriggerHeld_ = false;
+    prevHostPlaying_ = false;
+    stopCcHeld_ = false;
+    heldTriggerNotes_.fill(0u);
+    heldTriggerNoteCount_ = 0;
+    engine_.restartSequencer();
 }
 
 bool RhythmboxAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -45,6 +76,64 @@ void RhythmboxAudioProcessor::enqueueUiAuditionVoice(ke310::rhythmbox::VoiceId v
 {
     const auto bit = 1u << static_cast<unsigned>(voice);
     pendingUiVoices_.fetch_or(bit, std::memory_order_release);
+}
+
+void RhythmboxAudioProcessor::setRhythmStartHeldFromUi(bool held) noexcept
+{
+    uiRhythmStartHeld_.store(held, std::memory_order_release);
+}
+
+void RhythmboxAudioProcessor::setRhythmStopHeldFromUi(bool held) noexcept
+{
+    uiRhythmStopHeld_.store(held, std::memory_order_release);
+}
+
+bool RhythmboxAudioProcessor::isStandaloneMode() const noexcept
+{
+    return forceStandaloneForTest_ || (wrapperType == wrapperType_Standalone);
+}
+
+std::uint32_t RhythmboxAudioProcessor::consumeMidiFlashMask() noexcept
+{
+    return midiFlashVoices_.exchange(0u, std::memory_order_acq_rel);
+}
+
+bool RhythmboxAudioProcessor::updateRhythmGateState(bool rhythmArmed,
+                                                    bool hasPattern,
+                                                    bool breakOn,
+                                                    bool uiStartHeld,
+                                                    bool uiStopHeld,
+                                                    bool midiStartOn) noexcept
+{
+    const bool stopActive = stopCcHeld_ || uiStopHeld;
+    const bool triggerHeld = uiStartHeld || (midiStartOn && heldTriggerNoteCount_ > 0);
+    bool effectiveRunning = false;
+
+    if (!rhythmArmed || !hasPattern || stopActive)
+    {
+        rhythmLatched_ = false;
+        if (prevTriggerHeld_ && breakOn)
+        {
+            engine_.restartSequencer();
+        }
+        effectiveRunning = false;
+    }
+    else if (breakOn)
+    {
+        rhythmLatched_ = false;
+        if (!triggerHeld && prevTriggerHeld_)
+        {
+            engine_.restartSequencer();
+        }
+        effectiveRunning = triggerHeld;
+    }
+    else
+    {
+        effectiveRunning = rhythmLatched_;
+    }
+
+    prevTriggerHeld_ = triggerHeld;
+    return effectiveRunning;
 }
 
 ke310::rhythmbox::RhythmboxTelemetry RhythmboxAudioProcessor::readTelemetry() const noexcept
@@ -113,13 +202,38 @@ void RhythmboxAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
         return;
     }
 
-    auto rbState = rawParams_.readState();
-    if (std::popcount(rbState.patternMask) > 1)
+    auto rbBaseState = rawParams_.readState();
+    if (std::popcount(rbBaseState.patternMask) > 1)
     {
-        rbState.multiPatternEnabled = true;
+        rbBaseState.multiPatternEnabled = true;
     }
-    engine_.applyState(rbState);
+    const bool standalone = isStandaloneMode();
+    if (standalone)
+    {
+        rbBaseState.clockMode = ke310::rhythmbox::ClockMode::Internal;
+    }
+
+    const bool hasPattern = (rbBaseState.patternMask != 0u);
+    const bool rbArmed = rbBaseState.enabled;
+    const bool rbBreak = rawParams_.readBreakEnabled();
     const int listenChannel = rawParams_.readMidiChannel();
+    const bool midiStartOn = rawParams_.readMidiStartEnabled();
+    const int midiStartCh = rawParams_.readMidiStartChannel();
+    const bool stopCcOn = rawParams_.readStopCcEnabled();
+    const int stopCcNum = rawParams_.readStopCcNumber();
+    const int stopCcCh = rawParams_.readStopCcChannel();
+    const bool uiStartHeld = uiRhythmStartHeld_.load(std::memory_order_acquire);
+    const bool uiStopHeld = uiRhythmStopHeld_.load(std::memory_order_acquire);
+
+    if (!stopCcOn)
+    {
+        stopCcHeld_ = false;
+    }
+    if (!midiStartOn)
+    {
+        heldTriggerNotes_.fill(0u);
+        heldTriggerNoteCount_ = 0;
+    }
 
     // Flush queued UI audition pad triggers lock-free at sample 0
     const std::uint32_t uiMask = pendingUiVoices_.exchange(0u, std::memory_order_acq_rel);
@@ -134,35 +248,100 @@ void RhythmboxAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
         }
     }
 
-    // Read DAW playhead if available
+    // Read DAW playhead if available (disabled in Standalone app mode)
     ke310::rhythmbox::HostTransportInfo host{};
-    if (auto* ph = getPlayHead())
+    if (!standalone)
     {
-        if (const auto pos = ph->getPosition())
+        if (auto* ph = getPlayHead())
         {
-            host.hasTransport = true;
-            host.isPlaying = pos->getIsPlaying();
-            if (const auto bpmOpt = pos->getBpm())
+            if (const auto pos = ph->getPosition())
             {
-                host.hasBpm = true;
-                host.bpm = *bpmOpt;
-            }
-            if (const auto ppqOpt = pos->getPpqPosition())
-            {
-                host.hasPpqPosition = true;
-                host.ppqPosition = *ppqOpt;
+                host.hasTransport = true;
+                host.isPlaying = pos->getIsPlaying();
+                if (const auto bpmOpt = pos->getBpm())
+                {
+                    host.hasBpm = true;
+                    host.bpm = *bpmOpt;
+                }
+                if (const auto ppqOpt = pos->getPpqPosition())
+                {
+                    host.hasPpqPosition = true;
+                    host.ppqPosition = *ppqOpt;
+                }
             }
         }
     }
 
-    const double sliceBpm = (host.hasBpm && host.bpm >= 10.0) ? host.bpm : rbState.bpm;
+    if (uiStopHeld && !prevUiStopHeld_)
+    {
+        rhythmLatched_ = false;
+        engine_.restartSequencer();
+    }
+    if (!rbArmed && prevRhythmArmed_)
+    {
+        rhythmLatched_ = false;
+        engine_.restartSequencer();
+    }
+    if (rbBreak && !prevRhythmBreak_)
+    {
+        rhythmLatched_ = false;
+        engine_.restartSequencer();
+    }
+
+    const bool stopActiveAtStart = stopCcHeld_ || uiStopHeld;
+    if (uiStartHeld && !prevUiStartHeld_)
+    {
+        if (!rbBreak && rbArmed && hasPattern && !stopActiveAtStart)
+        {
+            rhythmLatched_ = true;
+        }
+    }
+    if (!standalone && rbBaseState.clockMode == ke310::rhythmbox::ClockMode::HostSync && host.hasTransport)
+    {
+        if (!host.isPlaying && prevHostPlaying_)
+        {
+            rhythmLatched_ = false;
+            engine_.restartSequencer();
+        }
+        else if (((host.isPlaying && !prevHostPlaying_) ||
+                  (rbArmed && !prevRhythmArmed_ && host.isPlaying) ||
+                  (prevClockMode_ != ke310::rhythmbox::ClockMode::HostSync && host.isPlaying)) &&
+                 rbArmed && hasPattern && !rbBreak && !stopActiveAtStart && !midiStartOn)
+        {
+            rhythmLatched_ = true;
+        }
+    }
+
+    prevUiStartHeld_ = uiStartHeld;
+    prevUiStopHeld_ = uiStopHeld;
+    prevRhythmArmed_ = rbArmed;
+    prevRhythmBreak_ = rbBreak;
+    prevHostPlaying_ = host.hasTransport && host.isPlaying;
+    prevClockMode_ = rbBaseState.clockMode;
+
+    auto applyEffectiveRb = [&]() noexcept
+    {
+        auto effectiveRbState = rbBaseState;
+        if (effectiveRbState.clockMode == ke310::rhythmbox::ClockMode::HostSync &&
+            (!host.hasTransport || !host.isPlaying || rbBreak))
+        {
+            effectiveRbState.clockMode = ke310::rhythmbox::ClockMode::TempoSync;
+        }
+        effectiveRbState.enabled = updateRhythmGateState(
+            rbArmed, hasPattern, rbBreak, uiStartHeld, uiStopHeld, midiStartOn);
+        engine_.applyState(effectiveRbState);
+    };
+    applyEffectiveRb();
+
+    const double sliceBpm = (host.hasBpm && host.bpm >= 10.0) ? host.bpm : rbBaseState.bpm;
     const double beatsPerSample = std::max(10.0, sliceBpm) / (60.0 * sampleRate_);
 
-    // Render sample-accurately around incoming MIDI Note-On events
+    // Render sample-accurately around incoming MIDI CC (Stop Switch), Note-On/Off (Synchro-Start & GM Voices)
     int cursor = 0;
+    std::uint32_t matchedMidiVoices = 0u;
     for (const auto meta : midiMessages)
     {
-        const int eventSample = std::clamp(meta.samplePosition, 0, numSamples);
+        const int eventSample = std::clamp(meta.samplePosition, cursor, numSamples);
         if (eventSample > cursor)
         {
             ke310::rhythmbox::HostTransportInfo sliceHost = host;
@@ -175,10 +354,73 @@ void RhythmboxAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
         }
 
         const auto msg = meta.getMessage();
+        if (stopCcOn && msg.isController() && msg.getControllerNumber() == stopCcNum &&
+            (stopCcCh == 0 || msg.getChannel() == stopCcCh))
+        {
+            const bool held = (msg.getControllerValue() >= 64);
+            if (held)
+            {
+                stopCcHeld_ = true;
+                rhythmLatched_ = false;
+                engine_.restartSequencer();
+            }
+            else
+            {
+                stopCcHeld_ = false;
+            }
+            applyEffectiveRb();
+        }
+
+        if (midiStartOn && (midiStartCh == 0 || msg.getChannel() == midiStartCh))
+        {
+            if (msg.isNoteOn())
+            {
+                const int n = std::clamp(msg.getNoteNumber(), 0, 127);
+                if (heldTriggerNotes_[static_cast<std::size_t>(n)] == 0u)
+                {
+                    heldTriggerNotes_[static_cast<std::size_t>(n)] = 1u;
+                    ++heldTriggerNoteCount_;
+                }
+                if (!rbBreak && rbArmed && hasPattern && !(stopCcHeld_ || uiStopHeld))
+                {
+                    rhythmLatched_ = true;
+                }
+                applyEffectiveRb();
+            }
+            else if (msg.isNoteOff())
+            {
+                const int n = std::clamp(msg.getNoteNumber(), 0, 127);
+                if (heldTriggerNotes_[static_cast<std::size_t>(n)] != 0u)
+                {
+                    heldTriggerNotes_[static_cast<std::size_t>(n)] = 0u;
+                    heldTriggerNoteCount_ = std::max(0, heldTriggerNoteCount_ - 1);
+                }
+                applyEffectiveRb();
+            }
+            else if (msg.isAllNotesOff() || msg.isAllSoundOff())
+            {
+                heldTriggerNotes_.fill(0u);
+                heldTriggerNoteCount_ = 0;
+                rhythmLatched_ = false;
+                prevTriggerHeld_ = false;
+                engine_.restartSequencer();
+                applyEffectiveRb();
+            }
+        }
+
         if (msg.isNoteOn() && listenChannel >= 0 && (listenChannel == 0 || msg.getChannel() == listenChannel))
         {
-            engine_.triggerMidiNote(msg.getNoteNumber(), static_cast<int>(msg.getVelocity()));
+            const auto voiceOpt = ke310::rhythmbox::mapGmMidiNoteToVoice(msg.getNoteNumber());
+            if (voiceOpt.has_value() && engine_.triggerMidiNote(msg.getNoteNumber(), static_cast<int>(msg.getVelocity())))
+            {
+                matchedMidiVoices |= (1u << static_cast<unsigned>(*voiceOpt));
+            }
         }
+    }
+
+    if (matchedMidiVoices != 0u)
+    {
+        midiFlashVoices_.fetch_or(matchedMidiVoices, std::memory_order_release);
     }
 
     if (cursor < numSamples)

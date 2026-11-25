@@ -20,6 +20,7 @@ namespace ke310::rhythmbox_plugin
 namespace param_ids
 {
 inline constexpr const char* rbEnabled      = "rb_enabled";
+inline constexpr const char* rbBreak        = "rb_break";
 inline constexpr const char* rbMultiPattern = "rb_multi_pattern";
 inline constexpr const char* rbVariation    = "rb_variation";
 inline constexpr const char* rbSyncMode     = "rb_sync_mode";
@@ -28,6 +29,11 @@ inline constexpr const char* rbVolume       = "rb_volume";
 inline constexpr const char* rbTone         = "rb_tone";
 inline constexpr const char* rbAnalogDrift  = "rb_analog_drift";
 inline constexpr const char* rbMidiCh       = "rb_midi_ch";
+inline constexpr const char* rbMidiStartEn  = "rb_midi_start_enabled";
+inline constexpr const char* rbMidiStartCh  = "rb_midi_start_ch";
+inline constexpr const char* rbStopCcEn     = "rb_stop_cc_enabled";
+inline constexpr const char* rbStopCcNum    = "rb_stop_cc_num";
+inline constexpr const char* rbStopCcCh     = "rb_stop_cc_ch";
 
 inline constexpr std::array<const char*, ke310::rhythmbox::kNumPatterns> kPatternParamIds = {{
     "rb_pat_waltz",
@@ -92,6 +98,17 @@ inline juce::StringArray makeMidiChannelChoices()
     return arr;
 }
 
+inline juce::StringArray makeMidiTriggerChannelChoices()
+{
+    juce::StringArray arr;
+    arr.add("Omni");
+    for (int ch = 1; ch <= 16; ++ch)
+    {
+        arr.add("Ch " + juce::String(ch));
+    }
+    return arr;
+}
+
 inline void addRhythmboxParameters(std::vector<std::unique_ptr<juce::RangedAudioParameter>>& params,
                                    int defaultMidiChannelIndex = 0)
 {
@@ -100,7 +117,8 @@ inline void addRhythmboxParameters(std::vector<std::unique_ptr<juce::RangedAudio
         params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(id, 1), name, def));
     };
 
-    addBool(param_ids::rbEnabled, "Start / Stop", false);
+    addBool(param_ids::rbEnabled, "Rhythm Enable", false);
+    addBool(param_ids::rbBreak, "Rhythm Break", false);
     addBool(param_ids::rbMultiPattern, "Multi-Pattern (Wired-OR)", false);
     addBool(param_ids::rbVariation, "Variation", false);
 
@@ -134,16 +152,36 @@ inline void addRhythmboxParameters(std::vector<std::unique_ptr<juce::RangedAudio
     }
 }
 
+inline void addStandaloneRhythmboxTriggerParameters(std::vector<std::unique_ptr<juce::RangedAudioParameter>>& params)
+{
+    auto addBool = [&params](const char* id, const char* name, bool def)
+    {
+        params.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID(id, 1), name, def));
+    };
+
+    addBool(param_ids::rbMidiStartEn, "MIDI Key Start", false);
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID(param_ids::rbMidiStartCh, 1), "MIDI Start Channel", makeMidiTriggerChannelChoices(), 0));
+
+    addBool(param_ids::rbStopCcEn, "Rhythm Stop CC Enable", true);
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID(param_ids::rbStopCcNum, 1), "Rhythm Stop CC", 0, 127, 67));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID(param_ids::rbStopCcCh, 1), "Rhythm Stop CC Channel", makeMidiTriggerChannelChoices(), 0));
+}
+
 inline juce::AudioProcessorValueTreeState::ParameterLayout createRhythmboxParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
     addRhythmboxParameters(params);
+    addStandaloneRhythmboxTriggerParameters(params);
     return {params.begin(), params.end()};
 }
 
 struct CachedRhythmboxParams
 {
     std::atomic<float>* enabled = nullptr;
+    std::atomic<float>* breakMode = nullptr;
     std::atomic<float>* multiPattern = nullptr;
     std::atomic<float>* variation = nullptr;
     std::atomic<float>* syncMode = nullptr;
@@ -152,12 +190,18 @@ struct CachedRhythmboxParams
     std::atomic<float>* tone = nullptr;
     std::atomic<float>* analogDrift = nullptr;
     std::atomic<float>* midiCh = nullptr;
+    std::atomic<float>* midiStartEn = nullptr;
+    std::atomic<float>* midiStartCh = nullptr;
+    std::atomic<float>* stopCcEn = nullptr;
+    std::atomic<float>* stopCcNum = nullptr;
+    std::atomic<float>* stopCcCh = nullptr;
     std::array<std::atomic<float>*, ke310::rhythmbox::kNumPatterns> patterns{};
 
     void bind(const juce::AudioProcessorValueTreeState& apvts) noexcept
     {
         auto p = [&apvts](const char* id) noexcept { return apvts.getRawParameterValue(id); };
         enabled = p(param_ids::rbEnabled);
+        breakMode = p(param_ids::rbBreak);
         multiPattern = p(param_ids::rbMultiPattern);
         variation = p(param_ids::rbVariation);
         syncMode = p(param_ids::rbSyncMode);
@@ -166,6 +210,11 @@ struct CachedRhythmboxParams
         tone = p(param_ids::rbTone);
         analogDrift = p(param_ids::rbAnalogDrift);
         midiCh = p(param_ids::rbMidiCh);
+        midiStartEn = p(param_ids::rbMidiStartEn);
+        midiStartCh = p(param_ids::rbMidiStartCh);
+        stopCcEn = p(param_ids::rbStopCcEn);
+        stopCcNum = p(param_ids::rbStopCcNum);
+        stopCcCh = p(param_ids::rbStopCcCh);
         for (std::size_t i = 0; i < ke310::rhythmbox::kNumPatterns; ++i)
         {
             patterns[i] = p(param_ids::kPatternParamIds[i]);
@@ -218,6 +267,48 @@ struct CachedRhythmboxParams
         }
         const int idx = static_cast<int>(std::lround(midiCh->load(std::memory_order_relaxed)));
         return (idx >= 17) ? -1 : std::clamp(idx, 0, 16);
+    }
+
+    bool readBreakEnabled() const noexcept
+    {
+        return (breakMode != nullptr) && (breakMode->load(std::memory_order_relaxed) >= 0.5f);
+    }
+
+    bool readMidiStartEnabled() const noexcept
+    {
+        return (midiStartEn != nullptr) && (midiStartEn->load(std::memory_order_relaxed) >= 0.5f);
+    }
+
+    int readMidiStartChannel() const noexcept
+    {
+        if (midiStartCh == nullptr)
+        {
+            return 0;
+        }
+        return std::clamp(static_cast<int>(std::lround(midiStartCh->load(std::memory_order_relaxed))), 0, 16);
+    }
+
+    bool readStopCcEnabled() const noexcept
+    {
+        return (stopCcEn == nullptr) || (stopCcEn->load(std::memory_order_relaxed) >= 0.5f);
+    }
+
+    int readStopCcNumber() const noexcept
+    {
+        if (stopCcNum == nullptr)
+        {
+            return 67;
+        }
+        return std::clamp(static_cast<int>(std::lround(stopCcNum->load(std::memory_order_relaxed))), 0, 127);
+    }
+
+    int readStopCcChannel() const noexcept
+    {
+        if (stopCcCh == nullptr)
+        {
+            return 0;
+        }
+        return std::clamp(static_cast<int>(std::lround(stopCcCh->load(std::memory_order_relaxed))), 0, 16);
     }
 };
 

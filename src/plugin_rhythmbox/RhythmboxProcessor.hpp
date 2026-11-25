@@ -5,6 +5,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -44,11 +45,22 @@ public:
 
     juce::AudioProcessorValueTreeState& apvts() noexcept { return apvts_; }
 
-    // Lock-free UI pad trigger & telemetry bridge
+    // Lock-free UI <-> Audio bridges & telemetry
     void enqueueUiAuditionVoice(ke310::rhythmbox::VoiceId voice) noexcept;
+    void setRhythmStartHeldFromUi(bool held) noexcept;
+    void setRhythmStopHeldFromUi(bool held) noexcept;
+    bool isStandaloneMode() const noexcept;
+    void setForceStandaloneForTest(bool force) noexcept { forceStandaloneForTest_ = force; }
+    std::uint32_t consumeMidiFlashMask() noexcept;
     ke310::rhythmbox::RhythmboxTelemetry readTelemetry() const noexcept;
 
 private:
+    bool updateRhythmGateState(bool rhythmArmed,
+                               bool hasPattern,
+                               bool breakOn,
+                               bool uiStartHeld,
+                               bool uiStopHeld,
+                               bool midiStartOn) noexcept;
     void renderSlice(int startSample,
                      int numSamples,
                      juce::AudioBuffer<float>& buffer,
@@ -62,7 +74,23 @@ private:
     ke310::rhythmbox::RhythmboxEngine engine_{};
     std::vector<double> monoScratch_;
 
+    bool prevUiStartHeld_ = false;
+    bool prevUiStopHeld_ = false;
+    bool prevRhythmArmed_ = false;
+    bool prevRhythmBreak_ = false;
+    bool prevHostPlaying_ = false;
+    ke310::rhythmbox::ClockMode prevClockMode_ = ke310::rhythmbox::ClockMode::TempoSync;
+    bool rhythmLatched_ = false;
+    bool prevTriggerHeld_ = false;
+    bool stopCcHeld_ = false;
+    bool forceStandaloneForTest_ = false;
+    std::array<std::uint8_t, 128> heldTriggerNotes_{};
+    int heldTriggerNoteCount_ = 0;
+
     std::atomic<std::uint32_t> pendingUiVoices_{0u};
+    std::atomic<bool> uiRhythmStartHeld_{false};
+    std::atomic<bool> uiRhythmStopHeld_{false};
+    std::atomic<std::uint32_t> midiFlashVoices_{0u};
     std::atomic<float> telRms_{0.0f};
     std::atomic<float> telPeak_{0.0f};
     std::atomic<float> telBpm_{106.8f};
