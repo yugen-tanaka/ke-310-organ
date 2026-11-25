@@ -1189,3 +1189,245 @@ TEST_CASE("13. Hornless RotaryDrumSpeaker inertia, Doppler/baffle stereo modulat
     }
 }
 
+TEST_CASE("14. Upper String 16' bypasses Upper Sustain & clickless live tone-tab switching", "[dsp][sustain][clickless]")
+{
+    constexpr double fs = 48000.0;
+
+    // 1) UPPER STRING 16' ignores UPPER SUSTAIN & KNEE SUSTAIN (matches UPPER TIBIA 16')
+    {
+        KE310Engine eSust, eKnee, eDry, eStr8;
+        eSust.prepare(fs);
+        eKnee.prepare(fs);
+        eDry.prepare(fs);
+        eStr8.prepare(fs);
+
+        KE310State st;
+        st.upperTibia8 = false;
+        st.upperString16 = true;
+        st.upperSustainTime = 0.85;
+        st.upperSustain = false;
+        st.kneeSustain = false;
+        eDry.applyState(st);
+
+        st.upperSustain = true;
+        eSust.applyState(st);
+
+        st.upperSustain = false;
+        st.kneeSustain = true;
+        eKnee.applyState(st);
+
+        KE310State st8;
+        st8.upperTibia8 = false;
+        st8.upperString8 = true;
+        st8.upperSustain = true;
+        st8.upperSustainTime = 0.85;
+        eStr8.applyState(st8);
+
+        const auto outDry = renderEvents(eDry, {{0.02, true, Manual::Upper, 60}, {0.15, false, Manual::Upper, 60}}, 0.60);
+        const auto outSust = renderEvents(eSust, {{0.02, true, Manual::Upper, 60}, {0.15, false, Manual::Upper, 60}}, 0.60);
+        const auto outKnee = renderEvents(eKnee, {{0.02, true, Manual::Upper, 60}, {0.15, false, Manual::Upper, 60}}, 0.60);
+        const auto outStr8 = renderEvents(eStr8, {{0.02, true, Manual::Upper, 60}, {0.15, false, Manual::Upper, 60}}, 0.60);
+
+        double maxSustDiff = 0.0;
+        double maxKneeDiff = 0.0;
+        for (std::size_t i = 0; i < outDry.mix.size(); ++i)
+        {
+            maxSustDiff = std::max(maxSustDiff, std::abs(outSust.mix[i] - outDry.mix[i]));
+            maxKneeDiff = std::max(maxKneeDiff, std::abs(outKnee.mix[i] - outDry.mix[i]));
+        }
+        INFO("maxSustDiff=" << maxSustDiff << " maxKneeDiff=" << maxKneeDiff);
+        REQUIRE(maxSustDiff < 1e-12);
+        REQUIRE(maxKneeDiff < 1e-12);
+
+        const double tail16 = computeRms(outSust.mix.data() + static_cast<std::size_t>(0.25 * fs),
+                                         static_cast<std::size_t>(0.20 * fs));
+        const double tail8 = computeRms(outStr8.mix.data() + static_cast<std::size_t>(0.25 * fs),
+                                        static_cast<std::size_t>(0.20 * fs));
+        REQUIRE(tail16 < 1e-5);
+        REQUIRE(tail8 > 0.005);
+
+        // Also stays sustained during key-hold under Piano takeover (matching UPPER TIBIA 16')
+        KE310Engine ePiano16;
+        ePiano16.prepare(fs);
+        KE310State stP16;
+        stP16.upperTibia8 = false;
+        stP16.upperString16 = true;
+        stP16.presetPiano = true;
+        stP16.presetVolume = 0.0;
+        ePiano16.applyState(stP16);
+        const auto outP16 = renderEvents(ePiano16, {{0.05, true, Manual::Upper, 60}, {2.20, false, Manual::Upper, 60}}, 2.30);
+        const double rStart = computeRms(outP16.mix.data() + static_cast<std::size_t>(0.08 * fs), static_cast<std::size_t>(0.12 * fs));
+        const double rLate = computeRms(outP16.mix.data() + static_cast<std::size_t>(1.60 * fs), static_cast<std::size_t>(0.30 * fs));
+        REQUIRE(rStart > 0.005);
+        REQUIRE(rLate > rStart * 0.85);
+    }
+
+    // Helper: measure max sample-to-sample jump around a switch sample index vs steady-state
+    auto maxAbsDelta = [](const std::vector<double>& sig, int startIdx, int endIdx) -> double
+    {
+        const int lo = std::max(1, startIdx);
+        const int hi = std::min(static_cast<int>(sig.size()), endIdx);
+        double mx = 0.0;
+        for (int i = lo; i < hi; ++i)
+        {
+            mx = std::max(mx, std::abs(sig[static_cast<std::size_t>(i)] - sig[static_cast<std::size_t>(i - 1)]));
+        }
+        return mx;
+    };
+
+    auto renderLiveToggle = [&](const KE310State& initialState,
+                                const KE310State& toggledOffState,
+                                const KE310State& toggledOnState,
+                                Manual manual,
+                                int midiNote,
+                                std::vector<double>& outMix,
+                                int& offSample,
+                                int& onSample)
+    {
+        KE310Engine eng;
+        eng.prepare(fs);
+        eng.applyState(initialState);
+        eng.noteOn(manual, midiNote);
+
+        constexpr int kWarmupSamples = 4800; // 100 ms steady hold
+        constexpr int kOffSamples = 2400;    // 50 ms off (well past 6 ms ramp)
+        constexpr int kOnSamples = 2400;     // 50 ms back on
+        constexpr int kBlock = 64;
+        const int total = kWarmupSamples + kOffSamples + kOnSamples;
+        outMix.assign(static_cast<std::size_t>(total), 0.0);
+        std::vector<double> r(static_cast<std::size_t>(kBlock)), s(static_cast<std::size_t>(kBlock));
+
+        offSample = kWarmupSamples;
+        onSample = kWarmupSamples + kOffSamples;
+
+        int pos = 0;
+        while (pos < total)
+        {
+            if (pos == offSample)
+            {
+                eng.applyState(toggledOffState);
+            }
+            else if (pos == onSample)
+            {
+                eng.applyState(toggledOnState);
+            }
+            const int nextStop = (pos < offSample) ? offSample : ((pos < onSample) ? onSample : total);
+            const int n = std::min(kBlock, nextStop - pos);
+            eng.processBlock(n, outMix.data() + pos, r.data(), s.data());
+            pos += n;
+        }
+    };
+
+    // 2) Live toggling of Upper String 8' while note is held: smooth fade-out, silence, clickless fade-in
+    {
+        KE310State sOn, sOff;
+        sOn.upperTibia8 = false;
+        sOn.upperString8 = true;
+        sOff = sOn;
+        sOff.upperString8 = false;
+
+        std::vector<double> sig;
+        int offSample = 0, onSample = 0;
+        renderLiveToggle(sOn, sOff, sOn, Manual::Upper, 60, sig, offSample, onSample);
+
+        const double steadyDelta = maxAbsDelta(sig, offSample - 1024, offSample - 64);
+        const double offEdgeDelta = maxAbsDelta(sig, offSample - 16, offSample + 16);
+        const double onEdgeDelta = maxAbsDelta(sig, onSample - 16, onSample + 16);
+        const double silentRms = computeRms(sig.data() + offSample + static_cast<int>(0.025 * fs),
+                                            static_cast<int>(0.020 * fs));
+
+        REQUIRE(steadyDelta > 1e-4);
+        REQUIRE(silentRms < 1e-6);
+        REQUIRE(offEdgeDelta <= steadyDelta * 1.25);
+        REQUIRE(onEdgeDelta <= steadyDelta * 1.25);
+    }
+
+    // 3) Live toggling of Upper Tibia 4' alongside Tibia 8' (also exercises tibiaLoadGain smoothing)
+    {
+        KE310State sBoth, sOnly8;
+        sBoth.upperTibia8 = true;
+        sBoth.upperTibia4 = true;
+        sOnly8.upperTibia8 = true;
+        sOnly8.upperTibia4 = false;
+
+        std::vector<double> sig;
+        int offSample = 0, onSample = 0;
+        renderLiveToggle(sBoth, sOnly8, sBoth, Manual::Upper, 60, sig, offSample, onSample);
+
+        const double steadyDelta = maxAbsDelta(sig, offSample - 1024, offSample - 64);
+        const double offEdgeDelta = maxAbsDelta(sig, offSample - 16, offSample + 16);
+        const double onEdgeDelta = maxAbsDelta(sig, onSample - 16, onSample + 16);
+        REQUIRE(offEdgeDelta <= steadyDelta * 1.25);
+        REQUIRE(onEdgeDelta <= steadyDelta * 1.25);
+    }
+
+    // 4) Live toggling of WOW TRUMPET & MARIMBA presets mid-note (clears filter state & fades smoothly)
+    {
+        KE310State sOn, sOff;
+        sOn.upperTibia8 = false;
+        sOn.organSilent = true;
+        sOn.presetWowTrumpet = true;
+        sOn.presetMarimba = true;
+        sOn.presetVolume = 1.0;
+        sOff = sOn;
+        sOff.presetWowTrumpet = false;
+        sOff.presetMarimba = false;
+
+        std::vector<double> sig;
+        int offSample = 0, onSample = 0;
+        renderLiveToggle(sOn, sOff, sOn, Manual::Upper, 60, sig, offSample, onSample);
+
+        const double steadyDelta = maxAbsDelta(sig, offSample - 1024, offSample - 64);
+        const double offEdgeDelta = maxAbsDelta(sig, offSample - 16, offSample + 16);
+        const double onEdgeDelta = maxAbsDelta(sig, onSample - 16, onSample + 16);
+        const double silentRms = computeRms(sig.data() + offSample + static_cast<int>(0.025 * fs),
+                                            static_cast<int>(0.020 * fs));
+
+        REQUIRE(steadyDelta > 1e-4);
+        REQUIRE(silentRms < 1e-6);
+        REQUIRE(offEdgeDelta <= steadyDelta * 1.25);
+        REQUIRE(onEdgeDelta <= steadyDelta * 1.25);
+    }
+
+    // 5) Live toggling of ORGAN SILENT & Pedal Bourdon 16' mid-note
+    {
+        KE310State sOn, sOff;
+        sOn.upperTibia8 = false;
+        sOn.upperString8 = true;
+        sOff = sOn;
+        sOff.organSilent = true;
+
+        std::vector<double> sig;
+        int offSample = 0, onSample = 0;
+        renderLiveToggle(sOn, sOff, sOn, Manual::Upper, 60, sig, offSample, onSample);
+
+        const double steadyDelta = maxAbsDelta(sig, offSample - 1024, offSample - 64);
+        const double silentRms = computeRms(sig.data() + offSample + static_cast<int>(0.025 * fs),
+                                            static_cast<int>(0.020 * fs));
+        REQUIRE(silentRms < 1e-6);
+        REQUIRE(maxAbsDelta(sig, offSample - 16, offSample + 16) <= steadyDelta * 1.25);
+        REQUIRE(maxAbsDelta(sig, onSample - 16, onSample + 16) <= steadyDelta * 1.25);
+    }
+
+    {
+        KE310State sOn, sOff;
+        sOn.upperTibia8 = false;
+        sOn.pedalBourdon16 = true;
+        sOn.pedalVolume = 1.0;
+        sOff = sOn;
+        sOff.pedalBourdon16 = false;
+
+        std::vector<double> sig;
+        int offSample = 0, onSample = 0;
+        renderLiveToggle(sOn, sOff, sOn, Manual::Pedal, 36, sig, offSample, onSample);
+
+        const double steadyDelta = maxAbsDelta(sig, offSample - 1024, offSample - 64);
+        const double silentRms = computeRms(sig.data() + offSample + static_cast<int>(0.025 * fs),
+                                            static_cast<int>(0.020 * fs));
+        REQUIRE(steadyDelta > 1e-4);
+        REQUIRE(silentRms < 1e-6);
+        REQUIRE(maxAbsDelta(sig, offSample - 16, offSample + 16) <= steadyDelta * 1.25);
+        REQUIRE(maxAbsDelta(sig, onSample - 16, onSample + 16) <= steadyDelta * 1.25);
+    }
+}
+

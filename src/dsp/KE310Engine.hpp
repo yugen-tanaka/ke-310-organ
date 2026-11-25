@@ -171,6 +171,7 @@ public:
         wowBaseFilter_.reset();
         wowWahSvf_.reset();
         marimbaBusFilter_.reset();
+        snapTabGainsToState();
     }
 
     void applyState(const KE310State& newState) noexcept
@@ -185,6 +186,10 @@ public:
             expSmooth_ = std::clamp(newState.expression, 0.0, 1.0);
         }
         state_ = newState;
+        if (!anyKeyHeld() && masterTimeS_ == 0.0)
+        {
+            snapTabGainsToState();
+        }
     }
 
     const KE310State& state() const noexcept { return state_; }
@@ -596,6 +601,74 @@ private:
         slot.marimbaFiltersReady = true;
     }
 
+    static constexpr double kTabFadeS = 0.006;
+
+    static double smoothTabCurve(double g) noexcept
+    {
+        return g * g * (3.0 - 2.0 * g);
+    }
+
+    static double stepLinearGain(double g, double targetG, double step) noexcept
+    {
+        if (g < targetG)
+        {
+            return std::min(1.0, g + step);
+        }
+        if (g > targetG)
+        {
+            return std::max(0.0, g - step);
+        }
+        return g;
+    }
+
+    static void addSmoothedPreset(double* dst, const double* src, int n,
+                                  double presetVolume, bool targetOn,
+                                  double& tabGain, double tabStep) noexcept
+    {
+        const double targetG = targetOn ? 1.0 : 0.0;
+        double g = tabGain;
+        for (int i = 0; i < n; ++i)
+        {
+            g = stepLinearGain(g, targetG, tabStep);
+            dst[i] += src[i] * presetVolume * smoothTabCurve(g);
+        }
+        tabGain = g;
+    }
+
+    double computeTargetTibiaLoadGain() const noexcept
+    {
+        if (!state_.tibiaBusLoadComp)
+        {
+            return 1.0;
+        }
+        int nUpperTibias = 0;
+        for (std::size_t v = static_cast<std::size_t>(VoiceId::UpperTibia16);
+             v <= static_cast<std::size_t>(VoiceId::UpperTibia2_23); ++v)
+        {
+            if (isVoiceTabActive(static_cast<VoiceId>(v)))
+            {
+                ++nUpperTibias;
+            }
+        }
+        return 1.0 / (1.0 + 0.55 * static_cast<double>(std::max(0, nUpperTibias - 1)));
+    }
+
+    void snapTabGainsToState() noexcept
+    {
+        for (std::size_t v = 0; v < kNumVoices; ++v)
+        {
+            voiceTabGain_[v] = isVoiceTabActive(static_cast<VoiceId>(v)) ? 1.0 : 0.0;
+        }
+        presetTabGain_[0] = state_.presetPerc2_23 ? 1.0 : 0.0;
+        presetTabGain_[1] = state_.presetPiano ? 1.0 : 0.0;
+        presetTabGain_[2] = state_.presetHarpsichord ? 1.0 : 0.0;
+        presetTabGain_[3] = state_.presetBanjo ? 1.0 : 0.0;
+        presetTabGain_[4] = state_.presetMandolin ? 1.0 : 0.0;
+        presetTabGain_[5] = state_.presetMarimba ? 1.0 : 0.0;
+        presetTabGain_[6] = state_.presetWowTrumpet ? 1.0 : 0.0;
+        tibiaLoadGainSmooth_ = computeTargetTibiaLoadGain();
+    }
+
     bool isVoiceTabActive(VoiceId id) const noexcept
     {
         if (kVoiceSpecs[static_cast<std::size_t>(id)].manual == Manual::Upper && state_.organSilent)
@@ -646,21 +719,26 @@ private:
         vibratoLfo_.processBlock(n, effVibrato, st.vibratoFast, effDelayVibrato, anyKeyHeld(),
                                  pitchMult_.data(), vibAm_.data());
 
-        // Active tabs & buffers
+        // Active tabs & buffers (keep faded-out voices running until tab gain reaches 0.0)
+        const double tabStep = 1.0 / std::max(1.0, kTabFadeS * fs_);
         std::array<bool, kNumVoices> voiceActive{};
+        std::array<bool, kNumVoices> voiceRunning{};
         for (std::size_t v = 0; v < kNumVoices; ++v)
         {
             voiceActive[v] = isVoiceTabActive(static_cast<VoiceId>(v));
-            if (voiceActive[v])
+            voiceRunning[v] = voiceActive[v] || (voiceTabGain_[v] > 0.0);
+            if (voiceRunning[v])
             {
                 busBufs_[v].fill(0.0);
             }
         }
 
         std::array<bool, 7> pOn = {{pPerc, pPiano, pHarpsi, pBanjo, pMandolin, pMarimba, pWow}};
+        std::array<bool, 7> presetRunning{};
         for (std::size_t p = 0; p < 7; ++p)
         {
-            if (pOn[p])
+            presetRunning[p] = pOn[p] || (presetTabGain_[p] > 0.0);
+            if (presetRunning[p])
             {
                 presetBufs_[p].fill(0.0);
             }
@@ -694,7 +772,7 @@ private:
         marimbaEnv8_.fill(0.0);
         marimbaEnv4_.fill(0.0);
 
-        if ((pBanjo || pMandolin) && (keepRepeatPulsing || repRcBanjo_ > 1e-6 || repRcMandolin_ > 1e-6))
+        if ((presetRunning[3] || presetRunning[4]) && (keepRepeatPulsing || repRcBanjo_ > 1e-6 || repRcMandolin_ > 1e-6))
         {
             const double incRep = repHz / fs_;
             const double periodS = 1.0 / std::max(1.0, repHz);
@@ -728,7 +806,7 @@ private:
                 repPulseBanjo_[si] = rcB;
                 repPulseMandolin_[si] = rcM;
             }
-            if (keepRepeatPulsing && !pMarimba)
+            if (keepRepeatPulsing && !presetRunning[5])
             {
                 repeatPhase_ = ph;
             }
@@ -736,7 +814,7 @@ private:
             repRcMandolin_ = rcM;
         }
 
-        if (pMarimba && (keepRepeatPulsing || marimbaRc8_ > 1e-6 || marimbaRc4_ > 1e-6))
+        if (presetRunning[5] && (keepRepeatPulsing || marimbaRc8_ > 1e-6 || marimbaRc4_ > 1e-6))
         {
             const double periodCyc = 1.0 / std::max(1.0, repHz);
             const double incM = repHz / fs_;
@@ -856,7 +934,7 @@ private:
                                        nst.held ? tauDirAtk : tauDirRel, envDir_.data(), n);
 
             // Prepare PERC 2 2/3' envelope if active
-            bool runPerc = (pPerc && nst.percActive);
+            bool runPerc = (presetRunning[0] && nst.percActive);
             if (runPerc)
             {
                 double e = nst.envPerc;
@@ -897,7 +975,7 @@ private:
             bool anyUpperOrganActive = false;
             for (std::size_t v = 0; v <= static_cast<std::size_t>(VoiceId::UpperClarinet8); ++v)
             {
-                if (voiceActive[v])
+                if (voiceRunning[v])
                 {
                     anyUpperOrganActive = true;
                     break;
@@ -905,8 +983,8 @@ private:
             }
 
             const double f223 = tos_.noteFreq(midi + 19);
-            const bool need223Phase = voiceActive[static_cast<std::size_t>(VoiceId::UpperTibia2_23)] || runPerc;
-            if (pMarimba && (!nst.marimbaFiltersReady))
+            const bool need223Phase = voiceRunning[static_cast<std::size_t>(VoiceId::UpperTibia2_23)] || runPerc;
+            if (presetRunning[5] && (!nst.marimbaFiltersReady))
             {
                 initMarimbaNoteFilters(nst, fBase);
             }
@@ -927,7 +1005,7 @@ private:
                 {
                     for (std::size_t v = 0; v <= static_cast<std::size_t>(VoiceId::UpperClarinet8); ++v)
                     {
-                        if (!voiceActive[v])
+                        if (!voiceRunning[v])
                         {
                             continue;
                         }
@@ -968,7 +1046,7 @@ private:
                     presetBufs_[0][si] += w * envPerc_[si] * keySlopeGain(ps.source, f223);
                 }
 
-                if (pPiano)
+                if (presetRunning[1])
                 {
                     const auto& ps = kFixedPresetSpecs[static_cast<std::size_t>(FixedPresetId::Piano)];
                     const double w = staircaseWave(ph8, dt8, ps.source, fs_);
@@ -976,7 +1054,7 @@ private:
                         w * env84_[si] * keySlopeGain(ps.source, fBase);
                 }
 
-                if (pHarpsi)
+                if (presetRunning[2])
                 {
                     const auto& ps = kFixedPresetSpecs[static_cast<std::size_t>(FixedPresetId::Harpsichord)];
                     const double w = staircaseWave(ph8, dt8, ps.source, fs_);
@@ -984,21 +1062,21 @@ private:
                         w * env84_[si] * keySlopeGain(ps.source, fBase);
                 }
 
-                if (pBanjo)
+                if (presetRunning[3])
                 {
                     const auto& ps = kFixedPresetSpecs[static_cast<std::size_t>(FixedPresetId::Banjo)];
                     const double w = staircaseWave(ph8, dt8, ps.source, fs_);
                     presetBufs_[3][si] += w * repPulseBanjo_[si] * env84_[si] * keySlopeGain(ps.source, fBase);
                 }
 
-                if (pMandolin)
+                if (presetRunning[4])
                 {
                     const auto& ps = kFixedPresetSpecs[static_cast<std::size_t>(FixedPresetId::Mandolin)];
                     const double w = staircaseWave(ph8, dt8, ps.source, fs_);
                     presetBufs_[4][si] += w * repPulseMandolin_[si] * env84_[si] * keySlopeGain(ps.source, fBase);
                 }
 
-                if (pMarimba)
+                if (presetRunning[5])
                 {
                     const double w8 = staircaseWave(ph8, dt8, kMarimbaKTParams.source, fs_);
                     const double w4 = staircaseWave(ph4, 2.0 * dt8, kMarimbaKTParams.source, fs_);
@@ -1007,7 +1085,7 @@ private:
                     presetBufs_[5][si] += yM * env84_[si];
                 }
 
-                if (pWow)
+                if (presetRunning[6])
                 {
                     const double w = staircaseWave(ph8, dt8, kWowTrumpetParams.source, fs_);
                     presetBufs_[6][si] += w * env84_[si] * keySlopeGain(kWowTrumpetParams.source, fBase);
@@ -1034,7 +1112,7 @@ private:
         for (std::size_t v = static_cast<std::size_t>(VoiceId::LowerTibia8);
              v <= static_cast<std::size_t>(VoiceId::LowerString4); ++v)
         {
-            if (voiceActive[v])
+            if (voiceRunning[v])
             {
                 anyLowerOrganActive = true;
                 break;
@@ -1065,7 +1143,7 @@ private:
                     for (std::size_t v = static_cast<std::size_t>(VoiceId::LowerTibia8);
                          v <= static_cast<std::size_t>(VoiceId::LowerString4); ++v)
                     {
-                        if (!voiceActive[v])
+                        if (!voiceRunning[v])
                         {
                             continue;
                         }
@@ -1085,8 +1163,11 @@ private:
         }
 
         // --- Process Pedal (Monophonic Low-Note Priority) ---
+        const bool runPedalBourdon = voiceRunning[static_cast<std::size_t>(VoiceId::PedalBourdon16)];
+        const bool runPedalFlute = voiceRunning[static_cast<std::size_t>(VoiceId::PedalMajorFlute8)];
+        const bool runPedalSb = voiceRunning[static_cast<std::size_t>(VoiceId::PedalStringBass)];
         const bool pedalRanThisBlock =
-            (pedalActiveMidi_ >= 0 && (st.pedalBourdon16 || st.pedalMajorFlute8 || st.pedalStringBass));
+            (pedalActiveMidi_ >= 0 && (runPedalBourdon || runPedalFlute || runPedalSb));
         if (pedalRanThisBlock)
         {
             const double fPed = pedalVco_.noteFreq(pedalActiveMidi_);
@@ -1095,12 +1176,12 @@ private:
                                        ? (0.022 + std::pow(st.pedalSustainTime, 1.6) * 1.60)
                                        : 0.022;
 
-            if (st.pedalBourdon16 || st.pedalMajorFlute8)
+            if (runPedalBourdon || runPedalFlute)
             {
                 pedalEnvSust_ = expStepEnv(pedalEnvSust_, pedalHeld_ ? 1.0 : 0.0,
                                            pedalHeld_ ? 0.0028 : tauPedRel, envDir_.data(), n);
             }
-            if (st.pedalStringBass)
+            if (runPedalSb)
             {
                 const double tauSb = 0.391 + (st.pedalSustain ? st.pedalSustainTime * 1.2 : 0.0);
                 if (pedalHeld_)
@@ -1146,14 +1227,14 @@ private:
                 const double ph8 = wrap01(2.0 * ph16);
                 ph32 = wrap01(ph32 + 0.5 * dt16);
 
-                if (st.pedalBourdon16)
+                if (runPedalBourdon)
                 {
                     constexpr std::size_t v = static_cast<std::size_t>(VoiceId::PedalBourdon16);
                     const auto& spec = kVoiceSpecs[v];
                     const double w = staircaseWave(ph16, dt16, spec.source, fs_);
                     busBufs_[v][si] = w * envDir_[si] * st.pedalVolume * keySlopeGain(spec.source, 0.5 * fPed);
                 }
-                if (st.pedalMajorFlute8)
+                if (runPedalFlute)
                 {
                     constexpr std::size_t v = static_cast<std::size_t>(VoiceId::PedalMajorFlute8);
                     const auto& spec = kVoiceSpecs[v];
@@ -1161,7 +1242,7 @@ private:
                     const double w = staircaseWave(ph8, dt8, spec.source, fs_, bleed, ph16);
                     busBufs_[v][si] = w * envDir_[si] * st.pedalVolume * keySlopeGain(spec.source, fPed);
                 }
-                if (st.pedalStringBass)
+                if (runPedalSb)
                 {
                     constexpr std::size_t v = static_cast<std::size_t>(VoiceId::PedalStringBass);
                     const auto& spec = kVoiceSpecs[v];
@@ -1183,66 +1264,91 @@ private:
         rotorSub_.fill(0.0);
         statSub_.fill(0.0);
 
-        int nUpperTibias = 0;
-        for (std::size_t v = static_cast<std::size_t>(VoiceId::UpperTibia16);
-             v <= static_cast<std::size_t>(VoiceId::UpperTibia2_23); ++v)
+        const double targetTibiaLoad = computeTargetTibiaLoadGain();
+        const double cTibia = std::exp(-1.0 / (0.005 * fs_));
+        double tlG = tibiaLoadGainSmooth_;
+        for (int i = 0; i < n; ++i)
         {
-            if (voiceActive[v])
+            if (std::abs(targetTibiaLoad - tlG) < 1e-12)
             {
-                ++nUpperTibias;
+                tlG = targetTibiaLoad;
             }
+            else
+            {
+                tlG = targetTibiaLoad + cTibia * (tlG - targetTibiaLoad);
+            }
+            tibiaLoadBuf_[static_cast<std::size_t>(i)] = tlG;
         }
-        const double tibiaLoadGain = st.tibiaBusLoadComp
-                                       ? (1.0 / (1.0 + 0.55 * static_cast<double>(std::max(0, nUpperTibias - 1))))
-                                       : 1.0;
+        tibiaLoadGainSmooth_ = tlG;
 
         for (std::size_t v = 0; v < kNumVoices; ++v)
         {
-            if (!voiceActive[v])
+            if (!voiceRunning[v])
             {
                 continue;
             }
+            const double targetG = voiceActive[v] ? 1.0 : 0.0;
+            double g = voiceTabGain_[v];
             if (kVoiceSpecs[v].manual == Manual::Pedal && !pedalRanThisBlock)
             {
+                for (int i = 0; i < n; ++i)
+                {
+                    g = stepLinearGain(g, targetG, tabStep);
+                }
+                voiceTabGain_[v] = g;
+                if (!voiceActive[v] && g == 0.0)
+                {
+                    voiceFilters_[v].reset();
+                }
                 continue;
             }
             const bool isUpperTibia = (v <= static_cast<std::size_t>(VoiceId::UpperTibia2_23));
-            const double gain = isUpperTibia ? tibiaLoadGain : 1.0;
             voiceFilters_[v].processInPlace(busBufs_[v].data(), n);
             double* dst = (kVoiceSpecs[v].bus == BusRoute::Rotor) ? rotorSub_.data() : statSub_.data();
             for (int i = 0; i < n; ++i)
             {
-                dst[i] += busBufs_[v][static_cast<std::size_t>(i)] * gain;
+                const std::size_t si = static_cast<std::size_t>(i);
+                g = stepLinearGain(g, targetG, tabStep);
+                const double tabG = smoothTabCurve(g);
+                const double busG = isUpperTibia ? tibiaLoadBuf_[si] : 1.0;
+                dst[i] += busBufs_[v][si] * busG * tabG;
+            }
+            voiceTabGain_[v] = g;
+            if (!voiceActive[v] && g == 0.0)
+            {
+                voiceFilters_[v].reset();
             }
         }
 
         // Fixed Presets 0..4 (Perc, Piano, Harpsichord, Banjo, Mandolin)
         for (std::size_t p = 0; p < kNumFixedPresets; ++p)
         {
-            if (!pOn[p])
+            if (!presetRunning[p])
             {
                 continue;
             }
             fixedPresetFilters_[p].processInPlace(presetBufs_[p].data(), n);
             double* dst = (kFixedPresetSpecs[p].bus == BusRoute::Rotor) ? rotorSub_.data() : statSub_.data();
-            for (int i = 0; i < n; ++i)
+            addSmoothedPreset(dst, presetBufs_[p].data(), n, st.presetVolume, pOn[p], presetTabGain_[p], tabStep);
+            if (!pOn[p] && presetTabGain_[p] == 0.0)
             {
-                dst[i] += presetBufs_[p][static_cast<std::size_t>(i)] * st.presetVolume;
+                fixedPresetFilters_[p].reset();
             }
         }
 
         // MARIMBA_KT Shared Bus Filter
-        if (pMarimba)
+        if (presetRunning[5])
         {
             marimbaBusFilter_.processInPlace(presetBufs_[5].data(), n);
-            for (int i = 0; i < n; ++i)
+            addSmoothedPreset(statSub_.data(), presetBufs_[5].data(), n, st.presetVolume, pMarimba, presetTabGain_[5], tabStep);
+            if (!pMarimba && presetTabGain_[5] == 0.0)
             {
-                statSub_[static_cast<std::size_t>(i)] += presetBufs_[5][static_cast<std::size_t>(i)] * st.presetVolume;
+                marimbaBusFilter_.reset();
             }
         }
 
         // WOW TRUMPET Onset Delay + Legato Carry-Over + ZDF-SVF Wah
-        if (pWow)
+        if (presetRunning[6])
         {
             wowBaseFilter_.processBlock(presetBufs_[6].data(), wowBase_.data(), n);
             const double repRate = std::clamp(st.repeatRate, 0.30, 0.80);
@@ -1308,9 +1414,11 @@ private:
             wowOnsetAgeS_ = age;
 
             wowWahSvf_.processModulated(wowBase_.data(), wowFc_.data(), wowQ_.data(), wowBase_.data(), n, 16);
-            for (int i = 0; i < n; ++i)
+            addSmoothedPreset(statSub_.data(), wowBase_.data(), n, st.presetVolume, pWow, presetTabGain_[6], tabStep);
+            if (!pWow && presetTabGain_[6] == 0.0)
             {
-                statSub_[static_cast<std::size_t>(i)] += wowBase_[static_cast<std::size_t>(i)] * st.presetVolume;
+                wowBaseFilter_.reset();
+                wowWahSvf_.reset();
             }
         }
 
@@ -1440,6 +1548,9 @@ private:
     double expLpStat_ = 0.0;
     std::uint32_t noiseRng_ = 0x13579BDFu;
     double noiseLp_ = 0.0;
+    std::array<double, kNumVoices> voiceTabGain_{};
+    std::array<double, 7> presetTabGain_{};
+    double tibiaLoadGainSmooth_ = 1.0;
 
     // Pre-allocated real-time scratch buffers
     std::array<double, kMaxSubBlock> pitchMult_{};
@@ -1454,6 +1565,7 @@ private:
     std::array<double, kMaxSubBlock> wowFc_{};
     std::array<double, kMaxSubBlock> wowQ_{};
     std::array<double, kMaxSubBlock> wowBase_{};
+    std::array<double, kMaxSubBlock> tibiaLoadBuf_{};
     std::array<std::array<double, kMaxSubBlock>, kNumVoices> busBufs_{};
     std::array<std::array<double, kMaxSubBlock>, 7> presetBufs_{};
     std::array<double, kMaxSubBlock> rotorSub_{};
