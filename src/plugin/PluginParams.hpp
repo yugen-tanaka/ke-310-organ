@@ -105,8 +105,8 @@ inline constexpr const char* expressionLoudnessComp = "expression_loudness_comp"
 inline constexpr const char* a4Hz                   = "a4_hz";
 inline constexpr const char* analogNoise            = "analog_noise";
 
-// Embedded KE Rhythmbox Organ Controls (2 organ-specific + shared 25 params)
-inline constexpr const char* rbBreak                = "rb_break";
+// Embedded KE Rhythmbox Organ Controls (2 organ-specific + shared params)
+inline constexpr const char* rbBreak                = ke310::rhythmbox_plugin::param_ids::rbBreak;
 inline constexpr const char* rbOutputBus            = "rb_output_bus";
 } // namespace param_ids
 
@@ -262,7 +262,6 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
 
     // Embedded KE Rhythmbox parameters (default GM drum trigger channel = Ch 10)
     ke310::rhythmbox_plugin::addRhythmboxParameters(params, 10);
-    addBool(param_ids::rbBreak, "Rhythm Break", false);
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{param_ids::rbOutputBus, 1}, "Rhythm Output Bus",
         makeRhythmOutputBusChoices(), 0));

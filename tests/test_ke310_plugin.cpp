@@ -28,6 +28,23 @@ float busRms(const juce::AudioProcessor& proc, const juce::AudioBuffer<float>& b
     return (busBuf.getNumChannels() > 0) ? busBuf.getRMSLevel(0, 0, buf.getNumSamples()) : 0.0f;
 }
 
+class MockOrganPlayHead final : public juce::AudioPlayHead
+{
+public:
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        PositionInfo info;
+        info.setIsPlaying(playing);
+        info.setBpm(bpm);
+        info.setPpqPosition(ppq);
+        return info;
+    }
+
+    bool playing = false;
+    double bpm = 120.0;
+    double ppq = 0.0;
+};
+
 } // namespace
 
 TEST_CASE("Plugin 1. 3-stereo-bus multi-out separation and ENSEMBLE routing", "[plugin][buses]")
@@ -309,6 +326,12 @@ TEST_CASE("Plugin 5. Custom KE-310 Retro GUI Editor instantiation, APVTS sync & 
     REQUIRE(organEditor->getNumChildComponents() > 50);
     REQUIRE(!organEditor->isSettingsVisible());
     REQUIRE(organEditor->rhythmPanel().isVisible());
+    REQUIRE(organEditor->rhythmPanel().rhythmStartButton().isVisible());
+    REQUIRE(organEditor->rhythmPanel().rhythmStopButton().isVisible());
+    REQUIRE(organEditor->rhythmPanel().rhythmStartButton().getWidth() >= 26);
+    REQUIRE(organEditor->rhythmPanel().rhythmStopButton().getWidth() >= 26);
+    REQUIRE(organEditor->rhythmPanel().getLocalBounds().contains(organEditor->rhythmPanel().rhythmStartButton().getBounds()));
+    REQUIRE(organEditor->rhythmPanel().getLocalBounds().contains(organEditor->rhythmPanel().rhythmStopButton().getBounds()));
     REQUIRE(TelemetryDisplay::formatVoiceText(0, 0, -1) == "UP:0   LO:0   PED:--");
     REQUIRE(TelemetryDisplay::formatVoiceText(4, 2, 36) == "UP:4   LO:2   PED:C2");
 
@@ -375,6 +398,10 @@ TEST_CASE("Plugin 5. Custom KE-310 Retro GUI Editor instantiation, APVTS sync & 
     organEditor->setSize(1000, 640);
     REQUIRE(organEditor->getWidth() == 1000);
     REQUIRE(organEditor->getHeight() == 640);
+    REQUIRE(organEditor->rhythmPanel().rhythmStartButton().getWidth() >= 26);
+    REQUIRE(organEditor->rhythmPanel().rhythmStopButton().getWidth() >= 26);
+    REQUIRE(organEditor->rhythmPanel().getLocalBounds().contains(organEditor->rhythmPanel().rhythmStartButton().getBounds()));
+    REQUIRE(organEditor->rhythmPanel().getLocalBounds().contains(organEditor->rhythmPanel().rhythmStopButton().getBounds()));
     juce::Image resizedMainImg(juce::Image::ARGB, organEditor->getWidth(), organEditor->getHeight(), true);
     {
         juce::Graphics rg(resizedMainImg);
@@ -658,4 +685,197 @@ TEST_CASE("Plugin 7. Embedded KE Rhythmbox RHYTHM synchro-start, BREAK gate, ENS
     REQUIRE(apvts.getParameter(param_ids::rbOutputBus)->getCurrentValueAsText() == "Rhythm Out (Isolated)");
     REQUIRE(apvts.getParameter(ke310::rhythmbox_plugin::param_ids::rbMidiCh)->getCurrentValueAsText() == "Ch 11");
     REQUIRE(apvts.getParameter(ke310::rhythmbox_plugin::param_ids::kPatternParamIds[7])->getValue() > 0.5f);
+}
+
+TEST_CASE("Plugin 8. Embedded KE Rhythmbox START/STOP buttons & DAW Host Sync consistency", "[plugin][rhythmbox][sync]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+    KE310AudioProcessor proc;
+    MockOrganPlayHead playHead;
+    proc.setPlayHead(&playHead);
+    proc.prepareToPlay(48000.0, 512);
+    auto& apvts = proc.apvts();
+
+    // Silence organ voices so rhythm state & output are isolated
+    setParamUnnorm(apvts, param_ids::upperTibia8, 0.0f);
+    setParamUnnorm(apvts, param_ids::organSilent, 1.0f);
+
+    std::unique_ptr<juce::AudioProcessorEditor> rawEditor(proc.createEditorIfNeeded());
+    REQUIRE(rawEditor != nullptr);
+    auto* organEditor = dynamic_cast<KE310AudioProcessorEditor*>(rawEditor.get());
+    REQUIRE(organEditor != nullptr);
+    auto& startBtn = organEditor->rhythmPanel().rhythmStartButton();
+    auto& stopBtn = organEditor->rhythmPanel().rhythmStopButton();
+
+    juce::AudioBuffer<float> buf(proc.getTotalNumOutputChannels(), 512);
+    juce::MidiBuffer midi;
+
+    auto pumpBlocks = [&](int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            proc.processBlock(buf, midi);
+        }
+    };
+
+    // 1) RHYTHM OFF: pressing START must NOT start rhythm
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbEnabled, 0.0f);
+    setParamUnnorm(apvts, param_ids::rbBreak, 0.0f);
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbSyncMode, 0.0f); // Internal
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(2);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+    startBtn.triggerHoldForTest(false);
+    pumpBlocks(2);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+
+    // 2) RHYTHM ON + BREAK OFF (Internal): START press+release latches running; STOP stops & resets to Beat 1 while RHYTHM remains ON
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbEnabled, 1.0f);
+    pumpBlocks(2);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning); // RHYTHM ON alone does not auto-start
+
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(busRms(proc, buf, 0) > 0.005f);
+    startBtn.triggerHoldForTest(false);
+    pumpBlocks(25);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning); // Latched after release
+    REQUIRE(proc.readRhythmTelemetry().lamp.currentStep > 0);
+
+    // Press & release STOP: stops immediately, resets to Beat 1, leaves RHYTHM ON
+    stopBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(apvts.getParameter(ke310::rhythmbox_plugin::param_ids::rbEnabled)->getValue() > 0.5f);
+
+    // Holding STOP inhibits both START button and Lower/Pedal triggers
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+    startBtn.triggerHoldForTest(false);
+
+    midi.addEvent(juce::MidiMessage::noteOn(2, 48, 1.0f), 0);
+    proc.processBlock(buf, midi);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+    midi.clear();
+    midi.addEvent(juce::MidiMessage::noteOff(2, 48), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+
+    stopBtn.triggerHoldForTest(false);
+    pumpBlocks(60); // Let percussion decay
+
+    // Pressing START again restarts from Beat 1 (step 0)
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(proc.readRhythmTelemetry().lamp.currentStep == 0);
+    startBtn.triggerHoldForTest(false);
+
+    stopBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    stopBtn.triggerHoldForTest(false);
+    pumpBlocks(60);
+
+    // 3) RHYTHM ON + BREAK ON: START acts as momentary Beat-1 gate (plays only while held)
+    setParamUnnorm(apvts, param_ids::rbBreak, 1.0f);
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(proc.readRhythmTelemetry().lamp.currentStep == 0);
+    pumpBlocks(25);
+    REQUIRE(proc.readRhythmTelemetry().lamp.currentStep > 0);
+    startBtn.triggerHoldForTest(false);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+    pumpBlocks(40);
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(proc.readRhythmTelemetry().lamp.currentStep == 0);
+    startBtn.triggerHoldForTest(false);
+    pumpBlocks(60);
+
+    // 4) Host Sync (ClockMode::HostSync) consistency with DAW Play/Stop and START/STOP buttons
+    setParamUnnorm(apvts, param_ids::rbBreak, 0.0f);
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbSyncMode, 2.0f); // Host Sync
+    playHead.playing = false;
+    playHead.bpm = 138.0;
+    playHead.ppq = 0.0;
+    pumpBlocks(2);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+
+    // 4a) DAW STOPPED in Host Sync: START allows manual preview at DAW BPM; STOP stops it
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(proc.readRhythmTelemetry().lamp.effectiveBpm == Catch::Approx(138.0).margin(0.05));
+    startBtn.triggerHoldForTest(false);
+    pumpBlocks(2);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+
+    stopBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+    stopBtn.triggerHoldForTest(false);
+    pumpBlocks(2);
+
+    // 4b) DAW Play transition (false -> true) with RHYTHM ON auto-starts locked to DAW PPQ
+    playHead.playing = true;
+    playHead.bpm = 144.0;
+    playHead.ppq = 0.0;
+    pumpBlocks(1);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(proc.readRhythmTelemetry().lamp.effectiveBpm == Catch::Approx(144.0).margin(0.05));
+
+    // 4c) Pressing STOP while DAW is playing stops rhythm and keeps it stopped after STOP release
+    stopBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+    stopBtn.triggerHoldForTest(false);
+    pumpBlocks(3);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+
+    // Pressing START while DAW is playing resumes locked to DAW PPQ
+    playHead.ppq = 4.0;
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(proc.readRhythmTelemetry().lamp.currentStep == 16); // ROCK I has 4 bars (64 steps); PPQ 4.0 = Bar 2 Beat 1 (step 16)
+    startBtn.triggerHoldForTest(false);
+
+    // 4d) DAW Stop transition (true -> false) stops rhythm
+    playHead.playing = false;
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+
+    // 5) Standalone mode ignores stopped host playhead in Host Sync
+    proc.setForceStandaloneForTest(true);
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    startBtn.triggerHoldForTest(false);
+    stopBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+    stopBtn.triggerHoldForTest(false);
+    proc.setForceStandaloneForTest(false);
+
+    // 6) Host Tempo follows DAW BPM without auto-starting on DAW Play/Stop
+    setParamUnnorm(apvts, ke310::rhythmbox_plugin::param_ids::rbSyncMode, 1.0f); // Host Tempo
+    playHead.playing = false;
+    playHead.bpm = 152.0;
+    pumpBlocks(2);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning);
+    playHead.playing = true;
+    pumpBlocks(2);
+    REQUIRE_FALSE(proc.readRhythmTelemetry().lamp.isRunning); // Host Tempo does not auto-start
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readRhythmTelemetry().lamp.isRunning);
+    REQUIRE(proc.readRhythmTelemetry().lamp.effectiveBpm == Catch::Approx(152.0).margin(0.05));
+    startBtn.triggerHoldForTest(false);
+
+    rawEditor.reset();
 }

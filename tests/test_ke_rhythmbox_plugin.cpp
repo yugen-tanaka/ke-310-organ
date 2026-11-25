@@ -98,7 +98,7 @@ TEST_CASE("Rhythmbox Plugin 1: Main Stereo bus, default silence, 16 ROM patterns
     proc.processBlock(buf, midi);
     REQUIRE(bufferMaxAbs(buf) == 0.0f);
 
-    // Every one of the 16 ROM patterns produces finite stereo output when enabled
+    // Every one of the 16 ROM patterns produces finite stereo output when armed and started
     setParamUnnorm(apvts, param_ids::rbSyncMode, 0.0f); // Internal
     setParamUnnorm(apvts, param_ids::rbEnabled, 1.0f);
     for (std::size_t p = 0; p < kNumPatterns; ++p)
@@ -108,8 +108,10 @@ TEST_CASE("Rhythmbox Plugin 1: Main Stereo bus, default silence, 16 ROM patterns
             setParamUnnorm(apvts, param_ids::kPatternParamIds[j], (j == p) ? 1.0f : 0.0f);
         }
         proc.prepareToPlay(48000.0, 512);
+        proc.setRhythmStartHeldFromUi(true);
         juce::AudioBuffer<float> patBuf(2, 4096);
         proc.processBlock(patBuf, midi);
+        proc.setRhythmStartHeldFromUi(false);
         REQUIRE(bufferAllFinite(patBuf));
         const float rmsL = patBuf.getRMSLevel(0, 0, 4096);
         const float rmsR = patBuf.getRMSLevel(1, 0, 4096);
@@ -219,11 +221,13 @@ TEST_CASE("Rhythmbox Plugin 3: AudioPlayHead HostSync (PPQ/BPM/Loop) and TempoSy
     proc.processBlock(buf, midi);
     REQUIRE(bufferMaxAbs(buf, 0, 256) > 0.02f);
 
-    // 4) TempoSync (index 1) follows DAW BPM (142.0) even while DAW transport is paused
+    // 4) TempoSync (index 1) follows DAW BPM (142.0) even while DAW transport is paused (started via START)
     setParamUnnorm(apvts, param_ids::rbSyncMode, 1.0f); // Host Tempo
     playHead.playing = false;
     playHead.bpm = 142.0;
+    proc.setRhythmStartHeldFromUi(true);
     proc.processBlock(buf, midi);
+    proc.setRhythmStartHeldFromUi(false);
     REQUIRE(proc.readTelemetry().lamp.isRunning);
     REQUIRE(proc.readTelemetry().lamp.effectiveBpm == Catch::Approx(142.0).margin(0.05));
 }
@@ -249,6 +253,7 @@ TEST_CASE("Rhythmbox Plugin 4: TONE tilt, 16 factory programs & XML state save/r
         setParamUnnorm(apvts, param_ids::rbEnabled, 1.0f);
         setParamUnnorm(apvts, param_ids::rbTone, toneVal);
         setParamUnnorm(apvts, param_ids::rbVolume, 1.0f);
+        proc.setRhythmStartHeldFromUi(true);
 
         ke310::dsp::BiquadCascade<1> lp500;
         ke310::dsp::BiquadCascade<1> hp3000;
@@ -313,7 +318,7 @@ TEST_CASE("Rhythmbox Plugin 5: Custom GUI Editor, audition pad triggers, resize 
     proc.prepareToPlay(48000.0, 512);
     auto& apvts = proc.apvts();
 
-    // Activate BOSSA NOVA & START/STOP at beat 1 so Tempo LED, LED cap & meter are lit in screenshot
+    // Activate BOSSA NOVA & arm RHYTHM + START at beat 1 so Tempo LED, LED cap & meter are lit in screenshot
     proc.setCurrentProgram(static_cast<int>(PatternId::Bossanova));
     setParamUnnorm(apvts, param_ids::rbSyncMode, 0.0f); // Internal
     setParamUnnorm(apvts, param_ids::rbEnabled, 1.0f);
@@ -322,7 +327,9 @@ TEST_CASE("Rhythmbox Plugin 5: Custom GUI Editor, audition pad triggers, resize 
 
     juce::AudioBuffer<float> buf(2, 512);
     juce::MidiBuffer midi;
+    proc.setRhythmStartHeldFromUi(true);
     proc.processBlock(buf, midi);
+    proc.setRhythmStartHeldFromUi(false);
     REQUIRE(proc.readTelemetry().lamp.isRunning);
     REQUIRE(proc.readTelemetry().lamp.beatFlash);
 
@@ -330,7 +337,7 @@ TEST_CASE("Rhythmbox Plugin 5: Custom GUI Editor, audition pad triggers, resize 
     REQUIRE(rawEditor != nullptr);
     auto* rbEditor = dynamic_cast<RhythmboxAudioProcessorEditor*>(rawEditor.get());
     REQUIRE(rbEditor != nullptr);
-    REQUIRE(rbEditor->getWidth() == 780);
+    REQUIRE(rbEditor->getWidth() == 860);
     REQUIRE(rbEditor->getHeight() == 460);
 
     // Audition pad callback triggers audio through lock-free queue on next processBlock
@@ -347,7 +354,9 @@ TEST_CASE("Rhythmbox Plugin 5: Custom GUI Editor, audition pad triggers, resize 
 
     // Re-enable running state on Beat 1 for clean visual snapshot
     setParamUnnorm(apvts, param_ids::rbEnabled, 1.0f);
+    proc.setRhythmStartHeldFromUi(true);
     proc.processBlock(buf, midi);
+    proc.setRhythmStartHeldFromUi(false);
     rawEditor.reset();
     rawEditor.reset(proc.createEditorIfNeeded());
     rbEditor = dynamic_cast<RhythmboxAudioProcessorEditor*>(rawEditor.get());
@@ -389,19 +398,19 @@ TEST_CASE("Rhythmbox Plugin 5: Custom GUI Editor, audition pad triggers, resize 
         REQUIRE(outPng.getSize() > 15000);
     }
 
-    // Verify dynamic resizing (660 x 400 and back to 780 x 460)
-    rbEditor->setSize(660, 400);
-    REQUIRE(rbEditor->getWidth() == 660);
+    // Verify dynamic resizing (760 x 400 and back to 860 x 460)
+    rbEditor->setSize(760, 400);
+    REQUIRE(rbEditor->getWidth() == 760);
     REQUIRE(rbEditor->getHeight() == 400);
-    juce::Image compactImg(juce::Image::ARGB, 660, 400, true);
+    juce::Image compactImg(juce::Image::ARGB, 760, 400, true);
     {
         juce::Graphics cg(compactImg);
         rbEditor->paintEntireComponent(cg, true);
     }
     REQUIRE(!compactImg.isNull());
 
-    rbEditor->setSize(780, 460);
-    REQUIRE(rbEditor->getWidth() == 780);
+    rbEditor->setSize(860, 460);
+    REQUIRE(rbEditor->getWidth() == 860);
     REQUIRE(rbEditor->getHeight() == 460);
 
     rawEditor.reset();
@@ -514,6 +523,287 @@ TEST_CASE("Rhythmbox Plugin 6: Pattern button clicks select/unselect patterns, m
         REQUIRE(countActivePatterns() == 1);
         REQUIRE(isPatternOn(pid));
     }
+
+    rawEditor.reset();
+}
+
+TEST_CASE("Rhythmbox Plugin 7: START/STOP buttons, BREAK, MIDI Key Start & MIDI CC Rhythm Stop Switch",
+          "[rb_plugin][transport][midi]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+    RhythmboxAudioProcessor proc;
+    proc.prepareToPlay(48000.0, 512);
+    auto& apvts = proc.apvts();
+
+    setParamUnnorm(apvts, param_ids::rbSyncMode, 0.0f); // Internal
+    setParamUnnorm(apvts, param_ids::rbBpm, 120.0f);
+    setParamUnnorm(apvts, param_ids::rbMidiCh, 17.0f); // Disable GM drum map so trigger notes don't double-trigger voices
+
+    std::unique_ptr<juce::AudioProcessorEditor> rawEditor(proc.createEditorIfNeeded());
+    REQUIRE(rawEditor != nullptr);
+    auto* rbEditor = dynamic_cast<RhythmboxAudioProcessorEditor*>(rawEditor.get());
+    REQUIRE(rbEditor != nullptr);
+    auto& panel = rbEditor->rhythmboxPanel();
+    auto& startBtn = panel.rhythmStartButton();
+    auto& stopBtn = panel.rhythmStopButton();
+
+    REQUIRE(panel.breakButton().isVisible());
+    REQUIRE(panel.variationSquareButton().isVisible());
+    REQUIRE(panel.rhythmButton().isVisible());
+    REQUIRE(startBtn.isVisible());
+    REQUIRE(stopBtn.isVisible());
+
+    juce::AudioBuffer<float> buf(2, 512);
+    juce::MidiBuffer midi;
+    auto pumpBlocks = [&](int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            proc.processBlock(buf, midi);
+        }
+    };
+
+    // 1) RHYTHM OFF -> START does nothing
+    setParamUnnorm(apvts, param_ids::rbEnabled, 0.0f);
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(2);
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+    startBtn.triggerHoldForTest(false);
+
+    // 2) RHYTHM ON + BREAK OFF -> START latches, STOP stops & resets to Beat 1
+    setParamUnnorm(apvts, param_ids::rbEnabled, 1.0f);
+    setParamUnnorm(apvts, param_ids::rbBreak, 0.0f);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning); // Armed only, not running yet
+
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+    REQUIRE(proc.readTelemetry().lamp.currentStep == 0);
+    startBtn.triggerHoldForTest(false);
+    pumpBlocks(25);
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+    REQUIRE(proc.readTelemetry().lamp.currentStep > 0);
+
+    stopBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+    stopBtn.triggerHoldForTest(false);
+    pumpBlocks(60);
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+
+    // 3) RHYTHM ON + BREAK ON -> START acts as momentary Beat-1 gate
+    setParamUnnorm(apvts, param_ids::rbBreak, 1.0f);
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+    REQUIRE(proc.readTelemetry().lamp.currentStep == 0);
+    pumpBlocks(25);
+    REQUIRE(proc.readTelemetry().lamp.currentStep > 0);
+    startBtn.triggerHoldForTest(false);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+    pumpBlocks(60);
+
+    // 4) MIDI Key Start (Synchro-Start): disabled vs enabled, channel filter, latch vs BREAK gate
+    setParamUnnorm(apvts, param_ids::rbBreak, 0.0f);
+    setParamUnnorm(apvts, param_ids::rbMidiStartEn, 0.0f);
+    midi.clear();
+    midi.addEvent(juce::MidiMessage::noteOn(2, 48, 0.9f), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+
+    setParamUnnorm(apvts, param_ids::rbMidiStartEn, 1.0f);
+    setParamUnnorm(apvts, param_ids::rbMidiStartCh, 2.0f); // Ch 2
+    // Wrong channel (Ch 1) ignored
+    midi.addEvent(juce::MidiMessage::noteOn(1, 48, 0.9f), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+
+    // Matching channel (Ch 2) latches rhythm
+    midi.addEvent(juce::MidiMessage::noteOn(2, 48, 0.9f), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+    midi.addEvent(juce::MidiMessage::noteOff(2, 48), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE(proc.readTelemetry().lamp.isRunning); // Latched even after Note-Off when BREAK is OFF
+
+    // 5) MIDI CC Rhythm Stop Switch: CC >= 64 stops & inhibits START/MIDI-Start while held
+    setParamUnnorm(apvts, param_ids::rbStopCcEn, 1.0f);
+    setParamUnnorm(apvts, param_ids::rbStopCcNum, 67.0f);
+    setParamUnnorm(apvts, param_ids::rbStopCcCh, 0.0f); // Omni
+
+    midi.addEvent(juce::MidiMessage::controllerEvent(1, 67, 127), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+
+    // While Stop CC is held (>= 64), START and MIDI Key Start are inhibited
+    startBtn.triggerHoldForTest(true);
+    midi.addEvent(juce::MidiMessage::noteOn(2, 50, 0.9f), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+    startBtn.triggerHoldForTest(false);
+
+    // Release Stop CC (value < 64): clears inhibition without auto-starting
+    midi.addEvent(juce::MidiMessage::controllerEvent(1, 67, 0), 0);
+    midi.addEvent(juce::MidiMessage::noteOff(2, 50), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+
+    // 6) MIDI Key Start + BREAK ON: momentary Beat-1 gate while MIDI note held
+    setParamUnnorm(apvts, param_ids::rbBreak, 1.0f);
+    midi.addEvent(juce::MidiMessage::noteOn(2, 48, 0.9f), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+    pumpBlocks(20);
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+    midi.addEvent(juce::MidiMessage::noteOff(2, 48), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+
+    // Custom Stop CC number & channel filtering, plus disable toggle
+    setParamUnnorm(apvts, param_ids::rbBreak, 0.0f);
+    setParamUnnorm(apvts, param_ids::rbStopCcNum, 66.0f);
+    setParamUnnorm(apvts, param_ids::rbStopCcCh, 3.0f); // Ch 3
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    startBtn.triggerHoldForTest(false);
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+
+    // Wrong CC# (67) or wrong channel (Ch 1) does not stop
+    midi.addEvent(juce::MidiMessage::controllerEvent(3, 67, 127), 0);
+    midi.addEvent(juce::MidiMessage::controllerEvent(1, 66, 127), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+
+    // Matching CC 66 on Ch 3 stops it
+    midi.addEvent(juce::MidiMessage::controllerEvent(3, 66, 127), 0);
+    proc.processBlock(buf, midi);
+    midi.clear();
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+
+    // Disabling Stop CC clears inhibition immediately
+    setParamUnnorm(apvts, param_ids::rbStopCcEn, 0.0f);
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    startBtn.triggerHoldForTest(false);
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+
+    rawEditor.reset();
+}
+
+TEST_CASE("Rhythmbox Plugin 8: Unified DAW Host Sync, Standalone Mode isolation & Settings Overlay",
+          "[rb_plugin][sync][gui]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+    RhythmboxAudioProcessor proc;
+    MockPlayHead playHead;
+    proc.setPlayHead(&playHead);
+    proc.prepareToPlay(48000.0, 512);
+    auto& apvts = proc.apvts();
+
+    std::unique_ptr<juce::AudioProcessorEditor> rawEditor(proc.createEditorIfNeeded());
+    REQUIRE(rawEditor != nullptr);
+    auto* rbEditor = dynamic_cast<RhythmboxAudioProcessorEditor*>(rawEditor.get());
+    REQUIRE(rbEditor != nullptr);
+    auto& panel = rbEditor->rhythmboxPanel();
+    auto& startBtn = panel.rhythmStartButton();
+    auto& stopBtn = panel.rhythmStopButton();
+
+    // Settings gear button opens/closes overlay; Sync Mode is visible in Plugin mode
+    REQUIRE_FALSE(rbEditor->isSettingsOpen());
+    rbEditor->settingsGearButton().setToggleState(true, juce::sendNotificationSync);
+    REQUIRE(rbEditor->isSettingsOpen());
+    REQUIRE(rbEditor->settingsOverlay().isSyncModeVisible());
+    rbEditor->settingsGearButton().setToggleState(false, juce::sendNotificationSync);
+    REQUIRE_FALSE(rbEditor->isSettingsOpen());
+
+    juce::AudioBuffer<float> buf(2, 512);
+    juce::MidiBuffer midi;
+    auto pumpBlocks = [&](int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            proc.processBlock(buf, midi);
+        }
+    };
+
+    // Plugin Host Sync mode
+    setParamUnnorm(apvts, param_ids::rbEnabled, 1.0f);
+    setParamUnnorm(apvts, param_ids::rbBreak, 0.0f);
+    setParamUnnorm(apvts, param_ids::rbSyncMode, 2.0f); // Host Sync
+    playHead.playing = false;
+    playHead.bpm = 138.0;
+    playHead.ppq = 0.0;
+    pumpBlocks(2);
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+
+    // DAW stopped: manual START previews at DAW BPM; STOP stops it
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+    REQUIRE(proc.readTelemetry().lamp.effectiveBpm == Catch::Approx(138.0).margin(0.05));
+    startBtn.triggerHoldForTest(false);
+    stopBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+    stopBtn.triggerHoldForTest(false);
+
+    // DAW Play transitions false -> true: auto-starts locked to DAW PPQ
+    playHead.playing = true;
+    playHead.bpm = 144.0;
+    playHead.ppq = 0.0;
+    pumpBlocks(1);
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+    REQUIRE(proc.readTelemetry().lamp.effectiveBpm == Catch::Approx(144.0).margin(0.05));
+
+    // STOP while DAW playing stops rhythm and keeps stopped after STOP release
+    stopBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+    stopBtn.triggerHoldForTest(false);
+    pumpBlocks(3);
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+
+    // START while DAW playing resumes locked to DAW PPQ (PPQ 4.0 = Bar 2 Beat 1 = step 16 on ROCK I)
+    playHead.ppq = 4.0;
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+    REQUIRE(proc.readTelemetry().lamp.currentStep == 16);
+    startBtn.triggerHoldForTest(false);
+
+    // DAW Stop stops rhythm
+    playHead.playing = false;
+    pumpBlocks(1);
+    REQUIRE_FALSE(proc.readTelemetry().lamp.isRunning);
+
+    // Standalone mode: ignores DAW playhead/BPM and hides Sync Mode in Settings overlay
+    proc.setForceStandaloneForTest(true);
+    rbEditor->syncUiNow();
+    REQUIRE_FALSE(rbEditor->settingsOverlay().isSyncModeVisible());
+    setParamUnnorm(apvts, param_ids::rbBpm, 108.0f);
+    playHead.playing = false;
+    playHead.bpm = 175.0;
+    startBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    REQUIRE(proc.readTelemetry().lamp.isRunning);
+    REQUIRE(proc.readTelemetry().lamp.effectiveBpm == Catch::Approx(108.0).margin(0.05));
+    startBtn.triggerHoldForTest(false);
+    stopBtn.triggerHoldForTest(true);
+    pumpBlocks(1);
+    stopBtn.triggerHoldForTest(false);
+    proc.setForceStandaloneForTest(false);
 
     rawEditor.reset();
 }

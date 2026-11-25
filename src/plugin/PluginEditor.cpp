@@ -758,7 +758,9 @@ KE310AudioProcessorEditor::KE310AudioProcessorEditor(KE310AudioProcessor& owner)
           owner.apvts(),
           nullptr,
           [this]() { return processor_.readRhythmTelemetry(); },
-          ke310::ui::RhythmboxPanelMode::OrganEmbedded)
+          ke310::ui::RhythmboxPanelMode::OrganEmbedded,
+          [this](bool held) { processor_.setRhythmStartHeldFromUi(held); },
+          [this](bool held) { processor_.setRhythmStopHeldFromUi(held); })
 {
     setLookAndFeel(&lookAndFeel_);
 

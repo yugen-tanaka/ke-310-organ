@@ -49,9 +49,17 @@ void KE310AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     rotarySpeedHz_.store(0.0f, std::memory_order_relaxed);
 
     rhythmbox_.prepare(fs);
+    uiRhythmStartHeld_.store(false, std::memory_order_release);
+    uiRhythmStopHeld_.store(false, std::memory_order_release);
+    prevUiRhythmStartHeld_ = false;
+    prevUiRhythmStopHeld_ = false;
     rhythmLatchedRunning_ = false;
     prevRhythmTriggerHeld_ = false;
+    prevHostPlaying_ = false;
     auto rbState = rawParams_.rhythmbox.readState();
+    prevRhythmArmed_ = rbState.enabled;
+    prevRhythmBreak_ = rawParams_.readRhythmBreak();
+    prevRhythmClockMode_ = rbState.clockMode;
     rbState.enabled = false;
     rhythmbox_.applyState(rbState);
 
@@ -63,8 +71,13 @@ void KE310AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 void KE310AudioProcessor::releaseResources()
 {
     midiRouter_.handleAllNotesOff(engine_);
+    uiRhythmStartHeld_.store(false, std::memory_order_release);
+    uiRhythmStopHeld_.store(false, std::memory_order_release);
+    prevUiRhythmStartHeld_ = false;
+    prevUiRhythmStopHeld_ = false;
     rhythmLatchedRunning_ = false;
     prevRhythmTriggerHeld_ = false;
+    prevHostPlaying_ = false;
     rhythmbox_.restartSequencer();
 }
 
@@ -241,35 +254,60 @@ void KE310AudioProcessor::renderChunk(int startSample,
     }
 }
 
-bool KE310AudioProcessor::updateRhythmGateState(bool rhythmArmed, bool hasPattern, bool breakOn) noexcept
+void KE310AudioProcessor::setRhythmStartHeldFromUi(bool held) noexcept
 {
-    const bool keyHeld = engine_.isPedalHeld() || engine_.hasHeldLowerNoteInRange(36, 72);
+    uiRhythmStartHeld_.store(held, std::memory_order_release);
+}
+
+void KE310AudioProcessor::setRhythmStopHeldFromUi(bool held) noexcept
+{
+    uiRhythmStopHeld_.store(held, std::memory_order_release);
+}
+
+bool KE310AudioProcessor::isStandaloneMode() const noexcept
+{
+    return forceStandaloneForTest_ || (wrapperType == wrapperType_Standalone);
+}
+
+bool KE310AudioProcessor::updateRhythmGateState(bool rhythmArmed,
+                                                bool hasPattern,
+                                                bool breakOn,
+                                                bool uiStartHeld,
+                                                bool uiStopHeld) noexcept
+{
+    const bool triggerHeld = engine_.isPedalHeld()
+                          || engine_.hasHeldLowerNoteInRange(36, 72)
+                          || uiStartHeld;
     bool effectiveRunning = false;
 
-    if (!rhythmArmed || !hasPattern)
+    if (!rhythmArmed || !hasPattern || uiStopHeld)
     {
         rhythmLatchedRunning_ = false;
+        if (prevRhythmTriggerHeld_ && breakOn)
+        {
+            rhythmbox_.restartSequencer();
+        }
         effectiveRunning = false;
     }
     else if (breakOn)
     {
         rhythmLatchedRunning_ = false;
-        if (!keyHeld && prevRhythmTriggerHeld_)
+        if (!triggerHeld && prevRhythmTriggerHeld_)
         {
             rhythmbox_.restartSequencer();
         }
-        effectiveRunning = keyHeld;
+        effectiveRunning = triggerHeld;
     }
     else
     {
-        if (keyHeld)
+        if (triggerHeld)
         {
             rhythmLatchedRunning_ = true;
         }
         effectiveRunning = rhythmLatchedRunning_;
     }
 
-    prevRhythmTriggerHeld_ = keyHeld;
+    prevRhythmTriggerHeld_ = triggerHeld;
     return effectiveRunning;
 }
 
@@ -312,30 +350,87 @@ void KE310AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     const bool rbBreak = rawParams_.readRhythmBreak();
     const int rbOutMode = rawParams_.readRhythmOutputBus();
     const int rbListenCh = rawParams_.rhythmbox.readMidiChannel();
-
-    auto effectiveRbState = rbBaseState;
-    effectiveRbState.enabled = updateRhythmGateState(rbArmed, hasPattern, rbBreak);
-    rhythmbox_.applyState(effectiveRbState);
+    const bool uiStartHeld = uiRhythmStartHeld_.load(std::memory_order_acquire);
+    const bool uiStopHeld = uiRhythmStopHeld_.load(std::memory_order_acquire);
 
     ke310::rhythmbox::HostTransportInfo host{};
-    if (auto* ph = getPlayHead())
+    if (!isStandaloneMode())
     {
-        if (const auto pos = ph->getPosition())
+        if (auto* ph = getPlayHead())
         {
-            host.hasTransport = true;
-            host.isPlaying = pos->getIsPlaying();
-            if (const auto bpmOpt = pos->getBpm())
+            if (const auto pos = ph->getPosition())
             {
-                host.hasBpm = true;
-                host.bpm = *bpmOpt;
-            }
-            if (const auto ppqOpt = pos->getPpqPosition())
-            {
-                host.hasPpqPosition = true;
-                host.ppqPosition = *ppqOpt;
+                host.hasTransport = true;
+                host.isPlaying = pos->getIsPlaying();
+                if (const auto bpmOpt = pos->getBpm())
+                {
+                    host.hasBpm = true;
+                    host.bpm = *bpmOpt;
+                }
+                if (const auto ppqOpt = pos->getPpqPosition())
+                {
+                    host.hasPpqPosition = true;
+                    host.ppqPosition = *ppqOpt;
+                }
             }
         }
     }
+
+    if (uiStopHeld && !prevUiRhythmStopHeld_)
+    {
+        rhythmLatchedRunning_ = false;
+        rhythmbox_.restartSequencer();
+    }
+    if (!rbArmed && prevRhythmArmed_)
+    {
+        rhythmLatchedRunning_ = false;
+        rhythmbox_.restartSequencer();
+    }
+    if (rbBreak && !prevRhythmBreak_)
+    {
+        rhythmLatchedRunning_ = false;
+        rhythmbox_.restartSequencer();
+    }
+
+    if (rbBaseState.clockMode == ke310::rhythmbox::ClockMode::HostSync && host.hasTransport)
+    {
+        if (!host.isPlaying && prevHostPlaying_)
+        {
+            rhythmLatchedRunning_ = false;
+            rhythmbox_.restartSequencer();
+        }
+        else if (((host.isPlaying && !prevHostPlaying_) ||
+                  (rbArmed && !prevRhythmArmed_ && host.isPlaying) ||
+                  (prevRhythmClockMode_ != ke310::rhythmbox::ClockMode::HostSync && host.isPlaying)) &&
+                 rbArmed && hasPattern && !rbBreak && !uiStopHeld)
+        {
+            rhythmLatchedRunning_ = true;
+        }
+    }
+
+    prevUiRhythmStartHeld_ = uiStartHeld;
+    prevUiRhythmStopHeld_ = uiStopHeld;
+    prevRhythmArmed_ = rbArmed;
+    prevRhythmBreak_ = rbBreak;
+    prevHostPlaying_ = host.hasTransport && host.isPlaying;
+    prevRhythmClockMode_ = rbBaseState.clockMode;
+
+    auto effectiveRbState = rbBaseState;
+    auto applyEffectiveRb = [&]() noexcept
+    {
+        effectiveRbState = rbBaseState;
+        // In HostSync: lock to DAW PPQ when DAW is playing and BREAK is OFF.
+        // When DAW is stopped (manual START / Lower / Pedal preview) or BREAK is ON (Beat 1 restart),
+        // use TempoSync so rhythm follows DAW BPM without being blocked by !host.isPlaying or jumping mid-bar.
+        if (effectiveRbState.clockMode == ke310::rhythmbox::ClockMode::HostSync &&
+            (!host.hasTransport || !host.isPlaying || rbBreak))
+        {
+            effectiveRbState.clockMode = ke310::rhythmbox::ClockMode::TempoSync;
+        }
+        effectiveRbState.enabled = updateRhythmGateState(rbArmed, hasPattern, rbBreak, uiStartHeld, uiStopHeld);
+        rhythmbox_.applyState(effectiveRbState);
+    };
+    applyEffectiveRb();
 
     const double sliceBpm = (host.hasBpm && host.bpm >= 10.0) ? host.bpm : rbBaseState.bpm;
     const double beatsPerSample = std::max(10.0, sliceBpm) / (60.0 * sampleRate_);
@@ -363,14 +458,12 @@ void KE310AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             {
                 rhythmbox_.triggerMidiNote(msg.getNoteNumber(), static_cast<int>(msg.getVelocity()));
             }
-            effectiveRbState.enabled = updateRhythmGateState(rbArmed, hasPattern, rbBreak);
-            rhythmbox_.applyState(effectiveRbState);
+            applyEffectiveRb();
         }
         else if (msg.isNoteOff())
         {
             midiRouter_.handleNoteOff(msg.getChannel(), msg.getNoteNumber(), engine_);
-            effectiveRbState.enabled = updateRhythmGateState(rbArmed, hasPattern, rbBreak);
-            rhythmbox_.applyState(effectiveRbState);
+            applyEffectiveRb();
         }
         else if (msg.isAllNotesOff() || msg.isAllSoundOff())
         {
@@ -385,8 +478,7 @@ void KE310AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
         {
             handleMidiController(msg.getChannel(), msg.getControllerNumber(), msg.getControllerValue(), midiCfg);
             syncEngineAndMidiState(baseState, midiCfg);
-            effectiveRbState.enabled = updateRhythmGateState(rbArmed, hasPattern, rbBreak);
-            rhythmbox_.applyState(effectiveRbState);
+            applyEffectiveRb();
         }
     }
 

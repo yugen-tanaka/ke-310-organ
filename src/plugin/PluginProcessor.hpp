@@ -58,10 +58,20 @@ public:
     int activePedalMidi() const noexcept { return pedalActiveMidi_.load(std::memory_order_relaxed); }
     ke310::rhythmbox::RhythmboxTelemetry readRhythmTelemetry() const noexcept;
 
+    // Lock-free UI bridges & Standalone mode helpers for embedded Rhythmbox START/STOP buttons
+    void setRhythmStartHeldFromUi(bool held) noexcept;
+    void setRhythmStopHeldFromUi(bool held) noexcept;
+    bool isStandaloneMode() const noexcept;
+    void setForceStandaloneForTest(bool force) noexcept { forceStandaloneForTest_ = force; }
+
 private:
     void syncEngineAndMidiState(const dsp::KE310State& baseState, const dsp::MidiRouterConfig& midiCfg) noexcept;
     void handleMidiController(int channel, int ccNumber, int value, const dsp::MidiRouterConfig& midiCfg) noexcept;
-    bool updateRhythmGateState(bool rhythmArmed, bool hasPattern, bool breakOn) noexcept;
+    bool updateRhythmGateState(bool rhythmArmed,
+                               bool hasPattern,
+                               bool breakOn,
+                               bool uiStartHeld,
+                               bool uiStopHeld) noexcept;
     void renderChunk(int startSample,
                      int numSamples,
                      juce::AudioBuffer<float>& buffer,
@@ -79,6 +89,15 @@ private:
     ke310::rhythmbox::RhythmboxEngine rhythmbox_{};
     bool rhythmLatchedRunning_ = false;
     bool prevRhythmTriggerHeld_ = false;
+    std::atomic<bool> uiRhythmStartHeld_{false};
+    std::atomic<bool> uiRhythmStopHeld_{false};
+    bool prevUiRhythmStartHeld_ = false;
+    bool prevUiRhythmStopHeld_ = false;
+    bool prevRhythmArmed_ = false;
+    bool prevRhythmBreak_ = false;
+    bool prevHostPlaying_ = false;
+    ke310::rhythmbox::ClockMode prevRhythmClockMode_ = ke310::rhythmbox::ClockMode::TempoSync;
+    bool forceStandaloneForTest_ = false;
 
     // Real-time MIDI CC overrides combined seamlessly with APVTS state
     double cc11Expression_ = 1.0;
